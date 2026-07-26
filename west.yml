@@ -1,0 +1,31 @@
+# Copyright (c) 2026 Ian Adelman
+# SPDX-License-Identifier: MIT
+#
+# This repo is the west manifest repo. It pins the exact Zephyr revision the
+# firmware builds against, and CI builds against the same pin, so a local
+# build and a CI build are the same build.
+#
+#   python3 -m venv ~/.venv/zephyr && source ~/.venv/zephyr/bin/activate
+#   pip install west
+#   cd <parent-dir>
+#   git clone https://github.com/Ian-q/teensy-tinyllm.git
+#   west init -l teensy-tinyllm
+#   west update
+#   west zephyr-export
+#
+# Bumping Zephyr is a deliberate, reviewable change: edit `revision:`,
+# `west update`, rebuild, commit.
+
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.0.0
+      import: true
+
+  self:
+    path: teensy-tinyllm

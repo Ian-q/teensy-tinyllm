@@ -1,0 +1,38 @@
+/*
+ * Copyright (c) 2026 Ian Adelman
+ * SPDX-License-Identifier: MIT
+ *
+ * Teensy 4.1 overlay.
+ *
+ * Note what is NOT here: a flexspi2 PSRAM node. Zephyr's upstream teensy41
+ * board enables flexspi (the onboard 8 MB program flash) but not flexspi2,
+ * and the in-tree APS6404L memc driver does not build for this target on
+ * Zephyr 4.0 (zephyr#83244) nor handle two chips or the 16 MB ISSI part.
+ * src/psram_flexspi2.c owns that peripheral end to end instead.
+ *
+ * PSRAM at 0x70000000 is reachable without an MPU region because Zephyr
+ * enables PRIVDEFENA on ARMv7-M: privileged accesses fall through to the
+ * architectural default map, where 0x60000000-0x9FFFFFFF is Normal, cacheable
+ * write-back memory. That is exactly the attribute set we want, and it is why
+ * unaligned 32-bit loads of 18-byte Q4 blocks are legal. If CONFIG_USERSPACE
+ * is ever turned on, this stops being true and a region has to be declared.
+ */
+
+/ {
+	chosen {
+		zephyr,console = &cdc_acm_uart0;
+		zephyr,shell-uart = &cdc_acm_uart0;
+	};
+};
+
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+/* The native microSD slot. Enabled upstream already; restated here so the
+ * dependency is visible at the point of use. */
+&usdhc1 {
+	status = "okay";
+};

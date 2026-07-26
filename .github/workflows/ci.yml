@@ -1,0 +1,124 @@
+# Copyright (c) 2026 Ian Adelman
+# SPDX-License-Identifier: MIT
+
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host:
+    name: engine (host + qemu-arm + m7 size)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-linux-gnueabihf libc6-dev-armhf-cross qemu-user-static \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
+          python3 -m pip install --quiet numpy
+
+      - name: Host test suite
+        run: make -C host test
+
+      # The SMLAD kernels cannot be exercised natively, so run the real ARM
+      # DSP instructions under emulation. The Makefile also asserts that
+      # `smlad` is actually present in the binary — a silently disabled
+      # intrinsic falling back to portable C would otherwise pass.
+      - name: Cortex-M7 DSP kernels under QEMU
+        run: make -C host test-arm
+
+      - name: Cortex-M7 code size
+        run: make -C host size-m7
+
+      # A stale golden.h would quietly weaken the strongest test in the suite,
+      # so regenerate into a temp dir and diff.
+      - name: Golden vectors are current
+        run: |
+          make -C host fixtures
+          cp host/tests/golden.h /tmp/golden.committed.h
+          PYTHONPATH=tools python3 tools/gen_golden.py \
+            --model host/build/test_q4.etq --out /tmp/golden.regen.h
+          diff -u /tmp/golden.committed.h /tmp/golden.regen.h || {
+            echo "::error::host/tests/golden.h is stale — run 'make -C host golden'"
+            exit 1
+          }
+
+      - name: Q8_0 model path
+        run: ./host/build/test_all host/build/test_q8.etq
+
+  firmware:
+    name: zephyr build (teensy41)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zephyrproject-rtos/ci:v0.27.4
+      options: --user root
+    env:
+      ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+      ZEPHYR_SDK_INSTALL_DIR: /opt/toolchains/zephyr-sdk-0.16.8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: teensy-tinyllm
+
+      # ET-embed-style: this repo IS the manifest repo, so the Zephyr revision
+      # CI builds against is the one pinned in west.yml, not whatever is
+      # newest.
+      - name: west init/update from our pinned manifest
+        run: |
+          west init -l teensy-tinyllm
+          west update --narrow -o=--depth=1
+          west zephyr-export
+
+      - name: Build
+        run: west build -b teensy41 -p always teensy-tinyllm/firmware/teensy41-tinyllm
+
+      - name: Report footprint
+        run: |
+          arm-zephyr-eabi-size build/zephyr/zephyr.elf
+          echo "--- confirming the DSP kernels made it into the image"
+          arm-zephyr-eabi-objdump -d build/zephyr/zephyr.elf \
+            | grep -c smlad \
+            | xargs -I{} sh -c 'test {} -gt 0 || { echo "::error::no smlad in image"; exit 1; }; echo "smlad instructions: {}"'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zephyr-hex
+          path: |
+            build/zephyr/zephyr.hex
+            build/zephyr/zephyr.elf
+
+  python:
+    name: tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m pip install --quiet numpy ruff
+      - run: ruff check tools/
+      - name: Container round trip
+        run: |
+          cd host && mkdir -p build
+          PYTHONPATH=../tools python3 -m etq.make_test_model build/rt.etq
+          PYTHONPATH=../tools python3 -c "
+          import numpy as np
+          from etq.format import ALIGN, Reader, dtype_nbytes
+          buf = open('build/rt.etq','rb').read()
+          r = Reader(buf)
+          assert r.cfg.dim == 64 and r.tensor_count == 24, (r.cfg, r.tensor_count)
+          assert r.file_bytes == len(buf), (r.file_bytes, len(buf))
+          for name in r.order:
+              t = r.tensors[name]
+              n = int(np.prod(t.shape))
+              assert len(t.payload) == dtype_nbytes(t.dtype, n), name
+          # every payload must start 64-byte aligned or DMA bursts straddle
+          import struct
+          for i in range(r.tensor_count):
+              off = struct.unpack_from('<Q', buf, r.table_off + 64*i + 48)[0]
+              assert off % ALIGN == 0, (i, off)
+          print('round trip ok:', r.tensor_count, 'tensors,', len(buf), 'bytes')
+          "

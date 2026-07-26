@@ -1,0 +1,48 @@
+# Copyright (c) 2026 Ian Adelman
+# SPDX-License-Identifier: MIT
+
+mainmenu "Teensy 4.1 Tiny LLM"
+
+config TINYLLM_LOG_LEVEL
+	int "Log level for the tinyllm modules"
+	default 3
+	range 0 4
+
+config TINYLLM_FAST_ARENA_BYTES
+	int "DTCM arena for activations"
+	default 262144
+	help
+	  Holds every activation vector plus the logits. The logits alone are
+	  vocab_size * 4 bytes, which is 128 KB for a 32000-token Llama
+	  vocabulary, so this dominates. 256 KB comfortably fits a 32k-vocab
+	  model with a 1024-token context; shrink it if you are running a
+	  small-vocab model and want the DTCM back.
+
+config TINYLLM_STREAM_TILE_BYTES
+	int "Bounce buffer for SD-streamed models"
+	default 32768
+	help
+	  Must be at least one full weight-matrix row. SDIO throughput on this
+	  slot falls off sharply below 16 KB per read, so do not shrink this
+	  below that without measuring.
+
+config TINYLLM_PSRAM_BOOT_CLOCK_INDEX
+	int "FlexSPI2 clock index used at boot"
+	default 3
+	range 0 9
+	help
+	  Index into the clock table in psram_flexspi2.h. 3 = 105.6 MHz, the
+	  same conservative default Teensyduino 1.60 ships. `tinyllm psram
+	  sweep` finds the fastest one this board actually tolerates; once you
+	  know it, set it here so it applies from boot.
+
+config TINYLLM_PSRAM_MAX_CLOCK_INDEX
+	int "Highest clock index the sweep will try"
+	default 8
+	range 0 9
+	help
+	  8 = 166.2 MHz. Index 9 (176 MHz) exceeds the datasheet rating of
+	  every part PJRC sells and is left out of the default sweep; raise
+	  this only if you enjoy debugging intermittent bit flips.
+
+source "Kconfig.zephyr"
