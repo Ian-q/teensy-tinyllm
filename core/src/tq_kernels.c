@@ -120,6 +120,11 @@ uint16_t tq_float_to_half(float f)
 	}
 }
 
+/* ------------------------------------------------------- DSP intrinsics */
+
+#if defined(__ARM_FEATURE_DSP) && (__ARM_FEATURE_DSP == 1)
+#define TQ_HAVE_DSP 1
+
 /* ------------------------------------------------------------ byte loading
  *
  * Q4_0 blocks are 18 bytes, so every other block starts on a 2-byte boundary
@@ -128,6 +133,9 @@ uint16_t tq_float_to_half(float f)
  * Cortex-M7, which handles unaligned access in Normal memory. (This is also
  * why the PSRAM MPU region must be Normal, not Device — see
  * firmware/.../psram_flexspi2.c.)
+ * Only the DSP kernels do 32-bit loads, so it lives inside this guard —
+ * outside it, clang's -Wunused-function (which, unlike GCC's, fires for
+ * unused static inline functions in C) breaks the -Werror native build.
  */
 static inline uint32_t tq_ld32(const void *p)
 {
@@ -136,11 +144,6 @@ static inline uint32_t tq_ld32(const void *p)
 	memcpy(&v, p, sizeof(v));
 	return v;
 }
-
-/* ------------------------------------------------------- DSP intrinsics */
-
-#if defined(__ARM_FEATURE_DSP) && (__ARM_FEATURE_DSP == 1)
-#define TQ_HAVE_DSP 1
 
 static inline uint32_t tq_ssub8(uint32_t a, uint32_t b)
 {
