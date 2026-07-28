@@ -13,7 +13,10 @@ Design: docs/superpowers/specs/2026-07-27-chat-cli-design.md
 """
 from __future__ import annotations
 
+import random
 import re
+import subprocess
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 
@@ -233,3 +236,61 @@ class ShellFramer:
             if bare.startswith(e):
                 return [("error", bare)]
         return [("text", bare + "\n")]
+
+
+class LocalBackend:
+    """One tq_run subprocess per turn. stdout is the token stream, stderr the stats."""
+
+    def __init__(self, tq_run: str, model: str):
+        self.tq_run = tq_run
+        self.model = model
+        self.proc: subprocess.Popen | None = None
+        self._stats: GenStats | None = None
+
+    def generate(self, prompt: str, opts: GenOpts) -> Iterator[str]:
+        seed = (
+            opts.seed if opts.seed is not None else random.randrange(1, 1 << 31)
+        )
+        argv = [
+            self.tq_run, self.model, "-i", prompt,
+            "-n", str(opts.n), "-t", f"{opts.temp:g}", "-p", f"{opts.topp:g}",
+            "-s", str(seed),
+        ]
+        self._stats = None
+        try:
+            self.proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+        except OSError as e:
+            raise BackendError(f"cannot run {self.tq_run}: {e}") from e
+        while True:
+            chunk = self.proc.stdout.read1(4096)
+            if not chunk:
+                break
+            yield chunk.decode("utf-8", "replace")
+        err = self.proc.stderr.read().decode("utf-8", "replace")
+        rc = self.proc.wait()
+        self._stats = parse_stats_local(err)
+        if rc != 0:
+            tail = "\n".join(err.strip().splitlines()[-3:])
+            raise BackendError(f"tq_run exited {rc}: {tail}")
+
+    def stats(self) -> GenStats | None:
+        return self._stats
+
+    def cancel(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait()
+
+    def load(self, path: str) -> str:
+        self.model = path
+        return f"model set to {path} for subsequent turns\n"
+
+    def info(self) -> str:
+        # Trailing newline: the REPL prints backend text with end="", because
+        # the serial backend's lines already carry their newlines.
+        return f"local backend: {self.tq_run} {self.model}\n"
+
+    def close(self) -> None:
+        self.cancel()

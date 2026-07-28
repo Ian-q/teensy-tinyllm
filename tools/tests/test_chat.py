@@ -157,3 +157,57 @@ def test_framer_dash_prefixed_token_text():
     text, stats, errors, done = collect(run_framer(data, chunk=1))
     assert text == "--not a footer\n\n"
     assert len(stats) == 1 and done
+
+
+import pytest  # noqa: E402
+
+STUB_OK = """#!/usr/bin/env python3
+import sys
+sys.stdout.write(" ".join(sys.argv[1:]))
+sys.stdout.flush()
+sys.stderr.write(
+    "model   : stub\\n"
+    "\\n--\\n4 tokens in 0.100 s = 40.00 tok/s (first token 0.010 s)\\n"
+    "weight bytes read: 1.0 MB total, 0.25 MB/token\\n")
+"""
+
+STUB_FAIL = """#!/usr/bin/env python3
+import sys
+sys.stderr.write("open: No such file or directory\\n")
+sys.exit(1)
+"""
+
+
+def make_stub(tmp_path, body):
+    p = tmp_path / "tq_run"
+    p.write_text(body)
+    p.chmod(0o755)
+    return str(p)
+
+
+def test_local_backend_streams_and_stats(tmp_path):
+    be = chat.LocalBackend(make_stub(tmp_path, STUB_OK), "m.etq")
+    text = "".join(be.generate("Once upon", chat.GenOpts(n=4, seed=7)))
+    assert text == "m.etq -i Once upon -n 4 -t 0.9 -p 0.9 -s 7"
+    st = be.stats()
+    assert st and st.tokens == 4 and st.mb_per_token == 0.25
+
+
+def test_local_backend_random_seed_when_unpinned(tmp_path):
+    be = chat.LocalBackend(make_stub(tmp_path, STUB_OK), "m.etq")
+    a = "".join(be.generate("hi", chat.GenOpts()))
+    b = "".join(be.generate("hi", chat.GenOpts()))
+    assert a != b  # -s differs between unpinned turns
+
+
+def test_local_backend_error_exit(tmp_path):
+    be = chat.LocalBackend(make_stub(tmp_path, STUB_FAIL), "m.etq")
+    with pytest.raises(chat.BackendError, match="No such file"):
+        list(be.generate("hi", chat.GenOpts()))
+
+
+def test_local_backend_load_swaps_model(tmp_path):
+    be = chat.LocalBackend(make_stub(tmp_path, STUB_OK), "old.etq")
+    be.load("new.etq")
+    text = "".join(be.generate("hi", chat.GenOpts(seed=1)))
+    assert text.startswith("new.etq ")
