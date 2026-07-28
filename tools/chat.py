@@ -263,13 +263,21 @@ class LocalBackend:
             )
         except OSError as e:
             raise BackendError(f"cannot run {self.tq_run}: {e}") from e
-        while True:
-            chunk = self.proc.stdout.read1(4096)
-            if not chunk:
-                break
-            yield chunk.decode("utf-8", "replace")
-        err = self.proc.stderr.read().decode("utf-8", "replace")
-        rc = self.proc.wait()
+        try:
+            while True:
+                chunk = self.proc.stdout.read1(4096)
+                if not chunk:
+                    break
+                yield chunk.decode("utf-8", "replace")
+            err = self.proc.stderr.read().decode("utf-8", "replace")
+            rc = self.proc.wait()
+        finally:
+            if self.proc.poll() is None:
+                # generator abandoned mid-stream (Ctrl-C / GeneratorExit)
+                self.proc.kill()
+                self.proc.wait()
+            self.proc.stdout.close()
+            self.proc.stderr.close()
         self._stats = parse_stats_local(err)
         if rc != 0:
             tail = "\n".join(err.strip().splitlines()[-3:])

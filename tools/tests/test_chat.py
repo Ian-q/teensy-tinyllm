@@ -177,6 +177,14 @@ sys.stderr.write("open: No such file or directory\\n")
 sys.exit(1)
 """
 
+STUB_SLOW = """#!/usr/bin/env python3
+import sys, time
+while True:
+    sys.stdout.write("x")
+    sys.stdout.flush()
+    time.sleep(0.01)
+"""
+
 
 def make_stub(tmp_path, body):
     p = tmp_path / "tq_run"
@@ -211,3 +219,21 @@ def test_local_backend_load_swaps_model(tmp_path):
     be.load("new.etq")
     text = "".join(be.generate("hi", chat.GenOpts(seed=1)))
     assert text.startswith("new.etq ")
+
+
+def test_local_backend_abandoned_generator_kills_child(tmp_path):
+    be = chat.LocalBackend(make_stub(tmp_path, STUB_SLOW), "m.etq")
+    g = be.generate("hi", chat.GenOpts())
+    next(g)  # get first chunk
+    g.close()  # abandon generator
+    assert be.proc.poll() is not None  # child reaped
+    assert be.proc.stdout.closed
+    assert be.proc.stderr.closed
+
+
+def test_local_backend_pipes_closed_after_normal_turn(tmp_path):
+    be = chat.LocalBackend(make_stub(tmp_path, STUB_OK), "m.etq")
+    "".join(be.generate("hi", chat.GenOpts(seed=1)))
+    assert be.proc.stdout.closed
+    assert be.proc.stderr.closed
+    assert be.stats() is not None
