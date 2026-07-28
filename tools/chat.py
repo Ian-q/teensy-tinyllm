@@ -325,7 +325,10 @@ class SerialBackend:
                 import serial
             except ImportError as e:
                 raise BackendError("serial backend needs pyserial: pip install pyserial") from e
-            transport = serial.Serial(port, baud, timeout=0.1)
+            try:
+                transport = serial.Serial(port, baud, timeout=0.1)
+            except serial.SerialException as e:
+                raise BackendError(f"cannot open {port}: {e}") from e
         self.ser = transport
         self.dirty = False  # an interrupted command may still be producing output
         self._stats: GenStats | None = None
@@ -521,15 +524,19 @@ def main(argv=None) -> int:
     sp.add_argument("port", help="serial device, e.g. /dev/cu.usbmodem12345")
     sp.add_argument("--baud", type=int, default=115200)
     args = ap.parse_args(argv)
-    backend = (
-        LocalBackend(args.tq_run, args.model)
-        if args.mode == "local"
-        else SerialBackend(args.port, args.baud)
-    )
     try:
-        repl(backend, GenOpts())
-    finally:
-        backend.close()
+        backend = (
+            LocalBackend(args.tq_run, args.model)
+            if args.mode == "local"
+            else SerialBackend(args.port, args.baud)
+        )
+        try:
+            repl(backend, GenOpts())
+        finally:
+            backend.close()
+    except BackendError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -363,3 +363,9 @@ def test_parse_slash_load_and_quit():
     assert chat.parse_slash("/load a.etq", opts) == ("load", "a.etq")
     assert chat.parse_slash("/load", opts)[0] == "error"
     assert chat.parse_slash("/q", opts) == ("quit", None)
+
+
+def test_main_serial_open_failure_returns_1(capsys):
+    rc = chat.main(["serial", "/nonexistent-port-xyz"])
+    assert rc == 1
+    assert "error:" in capsys.readouterr().err
