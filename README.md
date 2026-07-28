@@ -73,6 +73,19 @@ sudo apt install gcc-arm-none-eabi libnewlib-arm-none-eabi
 make -C host size-m7
 ```
 
+## Talking to it
+
+`tools/chat.py` is a terminal chat REPL with two backends — the native build
+(no hardware needed) and the Teensy's USB serial console:
+
+```bash
+make -C host all fixtures
+python3 tools/chat.py local  host/build/test_q4.etq   # or a real model
+python3 tools/chat.py serial /dev/cu.usbmodem12345    # needs: pip install pyserial
+```
+
+Type to generate; `/help` lists the knobs (`/n`, `/t`, `/p`, `/s`, `/load`).
+
 ## Converting a real model
 
 ```bash

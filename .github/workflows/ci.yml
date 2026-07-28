@@ -98,8 +98,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 -m pip install --quiet numpy ruff
+      - run: python3 -m pip install --quiet numpy ruff pytest
       - run: ruff check tools/
+      - run: python3 -m pytest tools/tests -q
       - name: Container round trip
         run: |
           cd host && mkdir -p build
