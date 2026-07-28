@@ -42,3 +42,22 @@ def test_parse_stats_serial():
     assert st.first_s == 0.262
     assert abs(st.mb_per_token - 8520 / 1024.0) < 1e-9
     assert st.eff_mbs == 33.86
+
+
+def test_build_gen_command():
+    cmd = chat.build_gen_command("Once  upon a time", chat.GenOpts(n=64, temp=0.8), seed=7)
+    assert cmd == "tinyllm gen -n 64 -t 0.8 -p 0.9 -s 7 Once upon a time"
+
+
+def test_build_gen_command_rejects_long_prompt():
+    import pytest
+
+    with pytest.raises(chat.BackendError, match="191"):
+        chat.build_gen_command("x" * 300, chat.GenOpts(), seed=1)
+
+
+def test_build_gen_command_rejects_quotes():
+    import pytest
+
+    with pytest.raises(chat.BackendError, match="quote"):
+        chat.build_gen_command('say "hi"', chat.GenOpts(), seed=1)

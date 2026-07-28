@@ -73,3 +73,30 @@ def parse_stats_serial(text: str) -> GenStats | None:
         st.mb_per_token = int(b[1]) / 1024.0
         st.eff_mbs = float(b[2])
     return st
+
+
+SHELL_CMD_MAX = 255  # CONFIG_SHELL_CMD_BUFF_SIZE=256, minus the NUL
+PROMPT_BUF_MAX = 191  # cmd_gen's char prompt[192], minus the NUL
+
+
+def build_gen_command(prompt: str, opts: GenOpts, seed: int) -> str:
+    """Build a `tinyllm gen` line. The firmware re-joins argv words with single
+    spaces and SILENTLY DROPS words that overflow its 192-byte prompt buffer,
+    so the caps live here, as errors."""
+    prompt = " ".join(prompt.split())
+    if '"' in prompt:
+        raise BackendError(
+            "the Zephyr shell parses double quotes; remove them from the prompt"
+        )
+    nbytes = len(prompt.encode())
+    if nbytes > PROMPT_BUF_MAX:
+        raise BackendError(
+            f"prompt is {nbytes} bytes; the firmware caps it at {PROMPT_BUF_MAX}"
+        )
+    cmd = f"tinyllm gen -n {opts.n} -t {opts.temp:g} -p {opts.topp:g} -s {seed} {prompt}"
+    nbytes = len(cmd.encode())
+    if nbytes > SHELL_CMD_MAX:
+        raise BackendError(
+            f"command is {nbytes} bytes; the shell buffer caps it at {SHELL_CMD_MAX}"
+        )
+    return cmd
