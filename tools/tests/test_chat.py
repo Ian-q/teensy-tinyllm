@@ -52,7 +52,7 @@ def test_build_gen_command():
 def test_build_gen_command_rejects_long_prompt():
     import pytest
 
-    with pytest.raises(chat.BackendError, match="191"):
+    with pytest.raises(chat.BackendError, match="189"):
         chat.build_gen_command("x" * 300, chat.GenOpts(), seed=1)
 
 
@@ -61,3 +61,37 @@ def test_build_gen_command_rejects_quotes():
 
     with pytest.raises(chat.BackendError, match="quote"):
         chat.build_gen_command('say "hi"', chat.GenOpts(), seed=1)
+
+
+def test_build_gen_command_accepts_189_byte_prompt():
+    # Exactly 189 bytes is safe
+    prompt = "x" * 189
+    cmd = chat.build_gen_command(prompt, chat.GenOpts(), seed=1)
+    assert "x" * 189 in cmd
+
+
+def test_build_gen_command_rejects_190_byte_prompt():
+    import pytest
+
+    with pytest.raises(chat.BackendError, match="190"):
+        chat.build_gen_command("x" * 190, chat.GenOpts(), seed=1)
+
+
+def test_build_gen_command_rejects_191_byte_prompt():
+    import pytest
+
+    with pytest.raises(chat.BackendError, match="191"):
+        chat.build_gen_command("x" * 191, chat.GenOpts(), seed=1)
+
+
+def test_build_gen_command_rejects_flag_token():
+    import pytest
+
+    with pytest.raises(chat.BackendError, match="reserved flag token"):
+        chat.build_gen_command("hello -t 0.5 world", chat.GenOpts(), seed=1)
+
+
+def test_build_gen_command_allows_flag_like_word():
+    # Substring of flag like "t-shirts" is allowed (only exact matches rejected)
+    cmd = chat.build_gen_command("twenty -shirt t-shirts", chat.GenOpts(), seed=1)
+    assert "twenty" in cmd and "t-shirts" in cmd

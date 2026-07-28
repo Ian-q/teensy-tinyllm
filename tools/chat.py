@@ -76,18 +76,28 @@ def parse_stats_serial(text: str) -> GenStats | None:
 
 
 SHELL_CMD_MAX = 255  # CONFIG_SHELL_CMD_BUFF_SIZE=256, minus the NUL
-PROMPT_BUF_MAX = 191  # cmd_gen's char prompt[192], minus the NUL
+# cmd_gen loop: accepts word only when used + l + 2 < 192; worst case is single
+# word l + 2 < 192 => l <= 189. So 189-byte prompt is safe, 190+ is dropped.
+PROMPT_BUF_MAX = 189
 
 
 def build_gen_command(prompt: str, opts: GenOpts, seed: int) -> str:
     """Build a `tinyllm gen` line. The firmware re-joins argv words with single
     spaces and SILENTLY DROPS words that overflow its 192-byte prompt buffer,
-    so the caps live here, as errors."""
+    so the caps live here, as errors. Also guards against reserved flag tokens
+    that the firmware would parse as options."""
     prompt = " ".join(prompt.split())
     if '"' in prompt:
         raise BackendError(
             "the Zephyr shell parses double quotes; remove them from the prompt"
         )
+    words = prompt.split()
+    for word in words:
+        if word in ("-n", "-t", "-p", "-s"):
+            raise BackendError(
+                f"prompt contains reserved flag token '{word}'; "
+                "the firmware would read it as an option"
+            )
     nbytes = len(prompt.encode())
     if nbytes > PROMPT_BUF_MAX:
         raise BackendError(
