@@ -16,6 +16,7 @@ from __future__ import annotations
 import random
 import re
 import subprocess
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -302,3 +303,94 @@ class LocalBackend:
 
     def close(self) -> None:
         self.cancel()
+
+
+FIRST_BYTE_TIMEOUT = 120.0  # prefill on an SD-streamed model can run ~40 s
+INTER_CHUNK_TIMEOUT = 30.0
+LOAD_TIMEOUT = 120.0
+RESYNC_TIMEOUT = 300.0
+
+
+class SerialBackend:
+    """Drives the firmware's Zephyr shell. Zero firmware changes: it types what
+    you would type and parses what you would read."""
+
+    def __init__(self, port=None, baud=115200, transport=None):
+        if transport is None:
+            try:
+                import serial
+            except ImportError as e:
+                raise BackendError("serial backend needs pyserial: pip install pyserial") from e
+            transport = serial.Serial(port, baud, timeout=0.1)
+        self.ser = transport
+        self.dirty = False  # an interrupted command may still be producing output
+        self._stats: GenStats | None = None
+
+    def transportless_written(self) -> bytes:
+        return getattr(self.ser, "written", b"")
+
+    def _drain(self) -> None:
+        while self.ser.read(4096):
+            pass
+
+    def _resync(self) -> None:
+        """Wait out an interrupted command until the prompt reappears."""
+        fr = ShellFramer(expect_footer=False)
+        fr.state = "stream"  # no echo is coming
+        deadline = time.monotonic() + RESYNC_TIMEOUT
+        while time.monotonic() < deadline:
+            chunk = self.ser.read(4096)
+            if not chunk:
+                continue
+            for ev, _ in fr.feed(chunk.decode("utf-8", "replace")):
+                if ev == "done":
+                    self.dirty = False
+                    return
+        raise BackendError("device never returned to its prompt; power-cycle it?")
+
+    def _run(self, cmdline: str, expect_footer: bool, first_timeout: float) -> Iterator[str]:
+        if self.dirty:
+            self._resync()
+        self._drain()
+        self.ser.write((cmdline + "\n").encode())
+        fr = ShellFramer(expect_footer=expect_footer)
+        deadline = time.monotonic() + first_timeout
+        while True:
+            chunk = self.ser.read(4096)
+            if not chunk:
+                if time.monotonic() > deadline:
+                    self.dirty = True
+                    raise BackendError(f"timed out waiting for the device after `{cmdline}`")
+                continue
+            deadline = time.monotonic() + INTER_CHUNK_TIMEOUT
+            for ev, val in fr.feed(chunk.decode("utf-8", "replace")):
+                if ev == "text":
+                    yield val
+                elif ev == "stats":
+                    self._stats = val
+                elif ev == "error":
+                    self.dirty = True
+                    raise BackendError(val)
+                elif ev == "done":
+                    return
+
+    def generate(self, prompt: str, opts: GenOpts) -> Iterator[str]:
+        seed = opts.seed if opts.seed is not None else random.randrange(1, 1 << 31)
+        self._stats = None
+        yield from self._run(build_gen_command(prompt, opts, seed), True, FIRST_BYTE_TIMEOUT)
+
+    def stats(self) -> GenStats | None:
+        return self._stats
+
+    def cancel(self) -> None:
+        # cmd_gen cannot be aborted; the shell buffers our next line until it returns.
+        self.dirty = True
+
+    def load(self, path: str) -> str:
+        return "".join(self._run(f"tinyllm load {path}", False, LOAD_TIMEOUT))
+
+    def info(self) -> str:
+        return "".join(self._run("tinyllm info", False, 10.0))
+
+    def close(self) -> None:
+        self.ser.close()

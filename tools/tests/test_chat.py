@@ -237,3 +237,58 @@ def test_local_backend_pipes_closed_after_normal_turn(tmp_path):
     assert be.proc.stdout.closed
     assert be.proc.stderr.closed
     assert be.stats() is not None
+
+
+class FakeSerial:
+    """Scripted transport. Like real hardware, it has nothing to say until a
+    command is written — otherwise the backend's pre-command _drain() would
+    swallow the scripted reply. read() pops chunks after write() arms it."""
+
+    def __init__(self, chunks):
+        self.chunks = [c.encode() if isinstance(c, str) else c for c in chunks]
+        self.written = b""
+        self.armed = False
+
+    def read(self, n=1):
+        if not self.armed or not self.chunks:
+            return b""
+        return self.chunks.pop(0)
+
+    def write(self, data):
+        self.written += data
+        self.armed = True
+
+    def close(self):
+        pass
+
+
+def test_serial_backend_gen_roundtrip():
+    be = chat.SerialBackend(transport=FakeSerial([GEN_BYTES]))
+    text = "".join(be.generate("Once", chat.GenOpts(n=4, seed=7)))
+    assert be.transportless_written().startswith(b"tinyllm gen -n 4 ")
+    assert "pony" in text
+    st = be.stats()
+    assert st and st.tokens == 64 and st.eff_mbs == 33.86
+
+
+def test_serial_backend_error_marks_dirty_and_raises():
+    data = "echo\r\n\x1b[1;31mno model loaded — x\x1b[0m\r\ntinyllm> "
+    be = chat.SerialBackend(transport=FakeSerial([data]))
+    with pytest.raises(chat.BackendError, match="no model loaded"):
+        list(be.generate("hi", chat.GenOpts()))
+    assert be.dirty  # next command must resync to the prompt first
+
+
+def test_serial_backend_first_byte_timeout(monkeypatch):
+    monkeypatch.setattr(chat, "FIRST_BYTE_TIMEOUT", 0.05)
+    be = chat.SerialBackend(transport=FakeSerial([]))
+    with pytest.raises(chat.BackendError, match="timed out"):
+        list(be.generate("hi", chat.GenOpts()))
+
+
+def test_serial_backend_load():
+    data = "echo\r\nloading stories15M.etq\r\ndone  (8721 KB in 998 ms, 8734 KB/s)\r\ntinyllm> "
+    be = chat.SerialBackend(transport=FakeSerial([data]))
+    out = be.load("stories15M.etq")
+    assert "done" in out
+    assert be.transportless_written().startswith(b"tinyllm load stories15M.etq")
