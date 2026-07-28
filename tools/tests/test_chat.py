@@ -240,26 +240,29 @@ def test_local_backend_pipes_closed_after_normal_turn(tmp_path):
 
 
 class FakeSerial:
-    """Scripted transport. Like real hardware, it has nothing to say until a
-    command is written — otherwise the backend's pre-command _drain() would
-    swallow the scripted reply. read() pops chunks after write() arms it, and
-    each pop disarms again so a chunk queued for a later command can't be
-    drained early by *that* command's own pre-write _drain()."""
+    """Scripted transport. Each element of `script` is one command's reply,
+    given as a single chunk (str/bytes) or a list of chunks. read() serves a
+    chunk only once its command has been issued via write(), so a later
+    command's reply can never be drained early, while a single command's
+    multi-chunk reply flows without re-arming."""
 
-    def __init__(self, chunks):
-        self.chunks = [c.encode() if isinstance(c, str) else c for c in chunks]
+    def __init__(self, script):
+        self.queue = []
+        for i, burst in enumerate(script):
+            chunks = burst if isinstance(burst, list) else [burst]
+            for c in chunks:
+                self.queue.append((i, c.encode() if isinstance(c, str) else c))
         self.written = b""
-        self.armed = False
+        self.cmds = 0
 
     def read(self, n=1):
-        if not self.armed or not self.chunks:
-            return b""
-        self.armed = False
-        return self.chunks.pop(0)
+        if self.queue and self.queue[0][0] < self.cmds:
+            return self.queue.pop(0)[1]
+        return b""
 
     def write(self, data):
         self.written += data
-        self.armed = True
+        self.cmds += 1
 
     def close(self):
         pass
@@ -272,6 +275,16 @@ def test_serial_backend_gen_roundtrip():
     assert "pony" in text
     st = be.stats()
     assert st and st.tokens == 64 and st.eff_mbs == 33.86
+
+
+def test_serial_backend_multichunk_single_command():
+    head, tail = GEN_BYTES[:40], GEN_BYTES[40:]
+    be = chat.SerialBackend(transport=FakeSerial([[head, tail]]))
+    text = "".join(be.generate("Once", chat.GenOpts(n=4, seed=7)))
+    assert "pony" in text
+    st = be.stats()
+    assert st is not None and st.tokens == 64
+    assert be.dirty is False
 
 
 def test_serial_backend_error_with_prompt_stays_clean():
