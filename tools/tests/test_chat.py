@@ -95,3 +95,65 @@ def test_build_gen_command_allows_flag_like_word():
     # Substring of flag like "t-shirts" is allowed (only exact matches rejected)
     cmd = chat.build_gen_command("twenty -shirt t-shirts", chat.GenOpts(), seed=1)
     assert "twenty" in cmd and "t-shirts" in cmd
+
+
+GEN_BYTES = (
+    "tinyllm gen -n 4 -t 0.9 -p 0.9 -s 7 Once\r\n"  # echo
+    "Once upon a time there was a pony.\n"
+    "[00:00:01.123,456] <inf> tinyllm: something\r\n"
+    "\r\n--\r\n" + SERIAL_FOOTER.replace("\n", "\r\n") + "tinyllm> "
+)
+
+
+def run_framer(data: str, expect_footer: bool = True, chunk: int = 1):
+    fr = chat.ShellFramer(expect_footer=expect_footer)
+    events = []
+    for i in range(0, len(data), chunk):
+        events.extend(fr.feed(data[i : i + chunk]))
+    return events
+
+
+def collect(events):
+    text = "".join(v for e, v in events if e == "text")
+    stats = [v for e, v in events if e == "stats"]
+    errors = [v for e, v in events if e == "error"]
+    done = any(e == "done" for e, _ in events)
+    return text, stats, errors, done
+
+
+def test_framer_gen_byte_at_a_time():
+    text, stats, errors, done = collect(run_framer(GEN_BYTES, chunk=1))
+    assert text == "Once upon a time there was a pony.\n\n"
+    assert len(stats) == 1 and stats[0].tokens == 64
+    assert errors == [] and done
+
+
+def test_framer_gen_large_chunks():
+    text, stats, errors, done = collect(run_framer(GEN_BYTES, chunk=4096))
+    assert text == "Once upon a time there was a pony.\n\n"
+    assert len(stats) == 1 and done
+
+
+def test_framer_ansi_stripped_error():
+    data = (
+        "tinyllm gen x\r\n\x1b[1;31mno model loaded — `tinyllm load <file.etq>`"
+        "\x1b[0m\r\ntinyllm> "
+    )
+    text, stats, errors, done = collect(run_framer(data))
+    assert text == "" and stats == []
+    assert errors and errors[0].startswith("no model loaded")
+    assert done
+
+
+def test_framer_dashes_are_text_without_footer():
+    data = "tinyllm info\r\n--\r\nkernel: smlad\r\ntinyllm> "
+    text, stats, errors, done = collect(run_framer(data, expect_footer=False))
+    assert text == "--\nkernel: smlad\n"
+    assert stats == [] and done
+
+
+def test_framer_dash_prefixed_token_text():
+    data = "cmd\r\n--not a footer\r\n\r\n--\r\n" + SERIAL_FOOTER.replace("\n", "\r\n") + "tinyllm> "
+    text, stats, errors, done = collect(run_framer(data, chunk=1))
+    assert text == "--not a footer\n\n"
+    assert len(stats) == 1 and done

@@ -110,3 +110,126 @@ def build_gen_command(prompt: str, opts: GenOpts, seed: int) -> str:
             f"command is {nbytes} bytes; the shell buffer caps it at {SHELL_CMD_MAX}"
         )
     return cmd
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# A CSI sequence can arrive split across reads (e.g. one byte per feed()); hold
+# back a trailing partial sequence so ANSI_RE only ever sees complete ones.
+_ANSI_PARTIAL_RE = re.compile(r"\x1b(\[[0-9;]*)?\Z")
+PROMPT = "tinyllm> "
+FOOTER = "--"
+# Best-effort: the strings cmd_load/cmd_gen/cmd_stream emit via shell_error.
+ERROR_PREFIXES = (
+    "usage:",
+    "no model loaded",
+    "no PSRAM",
+    "encode:",
+    "forward at",
+    "open:",
+    "load:",
+    "read:",
+)
+
+_LOG_TPL = "[NN:NN:NN.NNN,NNN] <"
+
+
+def _log_match_len(s: str) -> int:
+    """Leading chars of s consistent with the Zephyr log prefix; -1 on mismatch."""
+    for i, ch in enumerate(s[: len(_LOG_TPL)]):
+        want = _LOG_TPL[i]
+        if want == "N":
+            if not ch.isdigit():
+                return -1
+        elif ch != want:
+            return -1
+    return min(len(s), len(_LOG_TPL))
+
+
+def _is_log_line(line: str) -> bool:
+    return _log_match_len(line) == len(_LOG_TPL)
+
+
+def _must_hold(partial: str) -> bool:
+    """True while a partial line could still turn into a control line."""
+    if not partial:
+        return False
+    if _log_match_len(partial) >= 0:
+        return True
+    if FOOTER.startswith(partial) or partial == FOOTER:
+        return True
+    if PROMPT.startswith(partial):
+        return True
+    return any(e.startswith(partial) or partial.startswith(e) for e in ERROR_PREFIXES)
+
+
+class ShellFramer:
+    """Turns the Zephyr shell's byte stream into ("text"|"error"|"stats"|"done", value) events.
+
+    States: echo (discard through the command echo's newline) -> stream ->
+    footer (two stats lines after `--`) -> tail (discard until the prompt).
+    """
+
+    def __init__(self, expect_footer: bool = True):
+        self.expect_footer = expect_footer
+        self.state = "echo"
+        self.buf = ""
+        self.raw = ""  # unstripped bytes withheld until a partial ANSI code resolves
+        self.line_is_text = False  # head of the current line was already emitted
+        self.footer: list[str] = []
+
+    def feed(self, data: str) -> list[tuple]:
+        out: list[tuple] = []
+        self.raw += data
+        m = _ANSI_PARTIAL_RE.search(self.raw)
+        cut = m.start() if m else len(self.raw)
+        cleaned, self.raw = self.raw[:cut], self.raw[cut:]
+        self.buf += ANSI_RE.sub("", cleaned).replace("\r", "")
+        while True:
+            if self.state == "echo":
+                nl = self.buf.find("\n")
+                if nl < 0:
+                    return out
+                self.buf = self.buf[nl + 1 :]
+                self.state = "stream"
+                continue
+            nl = self.buf.find("\n")
+            if nl >= 0:
+                line, self.buf = self.buf[:nl], self.buf[nl + 1 :]
+                out.extend(self._complete_line(line))
+                continue
+            if not self.line_is_text and self.buf.startswith(PROMPT):
+                self.buf = self.buf[len(PROMPT) :]
+                self.state = "tail"
+                out.append(("done", None))
+                continue
+            if self.state == "stream" and self.buf and (
+                self.line_is_text or not _must_hold(self.buf)
+            ):
+                out.append(("text", self.buf))
+                self.buf = ""
+                self.line_is_text = True
+            return out
+
+    def _complete_line(self, bare: str) -> list[tuple]:
+        head_emitted, self.line_is_text = self.line_is_text, False
+        if head_emitted:
+            # The line's head already streamed out; it cannot be a control line.
+            return [("text", bare + "\n")] if self.state == "stream" else []
+        if _is_log_line(bare):
+            return []
+        if self.state == "footer":
+            self.footer.append(bare)
+            if len(self.footer) == 2:
+                self.state = "tail"
+                st = parse_stats_serial("\n".join(self.footer))
+                return [("stats", st)] if st else []
+            return []
+        if self.state == "tail":
+            return []
+        if bare == FOOTER and self.expect_footer:
+            self.state = "footer"
+            return []
+        for e in ERROR_PREFIXES:
+            if bare.startswith(e):
+                return [("error", bare)]
+        return [("text", bare + "\n")]
