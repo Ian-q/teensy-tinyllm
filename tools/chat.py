@@ -309,6 +309,7 @@ FIRST_BYTE_TIMEOUT = 120.0  # prefill on an SD-streamed model can run ~40 s
 INTER_CHUNK_TIMEOUT = 30.0
 LOAD_TIMEOUT = 120.0
 RESYNC_TIMEOUT = 300.0
+DRAIN_TIMEOUT = 2.0
 
 
 class SerialBackend:
@@ -330,8 +331,10 @@ class SerialBackend:
         return getattr(self.ser, "written", b"")
 
     def _drain(self) -> None:
+        deadline = time.monotonic() + DRAIN_TIMEOUT
         while self.ser.read(4096):
-            pass
+            if time.monotonic() > deadline:
+                raise BackendError("device is flooding the line; power-cycle it?")
 
     def _resync(self) -> None:
         """Wait out an interrupted command until the prompt reappears."""
@@ -355,23 +358,34 @@ class SerialBackend:
         self.ser.write((cmdline + "\n").encode())
         fr = ShellFramer(expect_footer=expect_footer)
         deadline = time.monotonic() + first_timeout
+        # Deferred until "done" (or the deadline): the framer can emit "error"
+        # and "done" in the same feed() batch (the common
+        # "...error...\r\ntinyllm> " shape). Raising immediately on "error"
+        # would discard that bundled "done" and mark the backend dirty even
+        # though the device is provably idle at its prompt, sending the next
+        # command into a RESYNC_TIMEOUT wait for a prompt that already came.
+        error: str | None = None
         while True:
             chunk = self.ser.read(4096)
             if not chunk:
                 if time.monotonic() > deadline:
                     self.dirty = True
-                    raise BackendError(f"timed out waiting for the device after `{cmdline}`")
+                    raise BackendError(
+                        error or f"timed out waiting for the device after `{cmdline}`"
+                    )
                 continue
             deadline = time.monotonic() + INTER_CHUNK_TIMEOUT
             for ev, val in fr.feed(chunk.decode("utf-8", "replace")):
                 if ev == "text":
-                    yield val
+                    if error is None:
+                        yield val
                 elif ev == "stats":
                     self._stats = val
                 elif ev == "error":
-                    self.dirty = True
-                    raise BackendError(val)
+                    error = error or val
                 elif ev == "done":
+                    if error is not None:
+                        raise BackendError(error)
                     return
 
     def generate(self, prompt: str, opts: GenOpts) -> Iterator[str]:

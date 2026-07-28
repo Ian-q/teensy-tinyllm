@@ -242,7 +242,9 @@ def test_local_backend_pipes_closed_after_normal_turn(tmp_path):
 class FakeSerial:
     """Scripted transport. Like real hardware, it has nothing to say until a
     command is written — otherwise the backend's pre-command _drain() would
-    swallow the scripted reply. read() pops chunks after write() arms it."""
+    swallow the scripted reply. read() pops chunks after write() arms it, and
+    each pop disarms again so a chunk queued for a later command can't be
+    drained early by *that* command's own pre-write _drain()."""
 
     def __init__(self, chunks):
         self.chunks = [c.encode() if isinstance(c, str) else c for c in chunks]
@@ -252,6 +254,7 @@ class FakeSerial:
     def read(self, n=1):
         if not self.armed or not self.chunks:
             return b""
+        self.armed = False
         return self.chunks.pop(0)
 
     def write(self, data):
@@ -271,12 +274,39 @@ def test_serial_backend_gen_roundtrip():
     assert st and st.tokens == 64 and st.eff_mbs == 33.86
 
 
-def test_serial_backend_error_marks_dirty_and_raises():
+def test_serial_backend_error_with_prompt_stays_clean():
+    # Error text and the prompt arrive in the same reply: the device is
+    # provably idle at "tinyllm> " by the time we raise, so no resync needed.
     data = "echo\r\n\x1b[1;31mno model loaded — x\x1b[0m\r\ntinyllm> "
     be = chat.SerialBackend(transport=FakeSerial([data]))
     with pytest.raises(chat.BackendError, match="no model loaded"):
         list(be.generate("hi", chat.GenOpts()))
-    assert be.dirty  # next command must resync to the prompt first
+    assert be.dirty is False
+
+
+def test_serial_backend_error_without_prompt_marks_dirty(monkeypatch):
+    # Error text arrives but the line goes quiet before the prompt does: we
+    # cannot prove the device is idle, so the deadline path must mark dirty.
+    monkeypatch.setattr(chat, "FIRST_BYTE_TIMEOUT", 0.05)
+    monkeypatch.setattr(chat, "INTER_CHUNK_TIMEOUT", 0.05)
+    data = "echo\r\nno model loaded — x\r\n"
+    be = chat.SerialBackend(transport=FakeSerial([data]))
+    with pytest.raises(chat.BackendError, match="no model loaded"):
+        list(be.generate("hi", chat.GenOpts()))
+    assert be.dirty is True
+
+
+def test_serial_backend_usable_after_prompt_bundled_error():
+    data = "echo\r\n\x1b[1;31mno model loaded — x\x1b[0m\r\ntinyllm> "
+    be = chat.SerialBackend(transport=FakeSerial([data, GEN_BYTES]))
+    with pytest.raises(chat.BackendError, match="no model loaded"):
+        list(be.generate("hi", chat.GenOpts()))
+    assert be.dirty is False
+    # No resync delay: the second command's reply must be waiting already.
+    text = "".join(be.generate("Once", chat.GenOpts(n=4, seed=7)))
+    assert "pony" in text
+    st = be.stats()
+    assert st and st.tokens == 64
 
 
 def test_serial_backend_first_byte_timeout(monkeypatch):
