@@ -335,3 +335,31 @@ def test_serial_backend_load():
     out = be.load("stories15M.etq")
     assert "done" in out
     assert be.transportless_written().startswith(b"tinyllm load stories15M.etq")
+
+
+def test_parse_slash_gen_passthrough():
+    assert chat.parse_slash("Once upon a time", chat.GenOpts()) == ("gen", "Once upon a time")
+
+
+def test_parse_slash_sets_options():
+    opts = chat.GenOpts()
+    assert chat.parse_slash("/n 32", opts)[0] == "ok"
+    assert chat.parse_slash("/t 1.1", opts)[0] == "ok"
+    assert chat.parse_slash("/s 99", opts)[0] == "ok"
+    assert (opts.n, opts.temp, opts.seed) == (32, 1.1, 99)
+    assert chat.parse_slash("/s auto", opts)[0] == "ok"
+    assert opts.seed is None
+
+
+def test_parse_slash_bad_value_and_unknown():
+    opts = chat.GenOpts()
+    assert chat.parse_slash("/n pony", opts)[0] == "error"
+    assert opts.n == 128
+    assert chat.parse_slash("/frobnicate", opts)[0] == "error"
+
+
+def test_parse_slash_load_and_quit():
+    opts = chat.GenOpts()
+    assert chat.parse_slash("/load a.etq", opts) == ("load", "a.etq")
+    assert chat.parse_slash("/load", opts)[0] == "error"
+    assert chat.parse_slash("/q", opts) == ("quit", None)

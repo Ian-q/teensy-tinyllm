@@ -13,12 +13,15 @@ Design: docs/superpowers/specs/2026-07-27-chat-cli-design.md
 """
 from __future__ import annotations
 
+import argparse
 import random
 import re
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 
 class BackendError(Exception):
@@ -408,3 +411,127 @@ class SerialBackend:
 
     def close(self) -> None:
         self.ser.close()
+
+
+HELP = """\
+anything else   generate a completion of what you typed
+/n N            tokens per turn          /t X    temperature
+/p X            top-p                    /s N    pin the seed (/s auto to unpin)
+/load FILE      load a model (serial: from SD; local: path for the next spawn)
+/info           backend/device info      /q      quit"""
+
+DIM, RESET = "\x1b[2m", "\x1b[0m"
+
+
+def parse_slash(line: str, opts: GenOpts) -> tuple[str, str | None]:
+    if not line.startswith("/"):
+        return ("gen", line)
+    cmd, _, arg = line.partition(" ")
+    arg = arg.strip()
+    try:
+        if cmd == "/q":
+            return ("quit", None)
+        if cmd == "/help":
+            return ("ok", HELP)
+        if cmd == "/info":
+            return ("info", None)
+        if cmd == "/load":
+            return ("load", arg) if arg else ("error", "usage: /load <file.etq>")
+        if cmd == "/n":
+            opts.n = int(arg)
+            return ("ok", f"n = {opts.n}")
+        if cmd == "/t":
+            opts.temp = float(arg)
+            return ("ok", f"temp = {opts.temp:g}")
+        if cmd == "/p":
+            opts.topp = float(arg)
+            return ("ok", f"top-p = {opts.topp:g}")
+        if cmd == "/s":
+            if arg == "auto":
+                opts.seed = None
+                return ("ok", "seed = fresh each turn")
+            opts.seed = int(arg)
+            return ("ok", f"seed = {opts.seed}")
+    except ValueError:
+        return ("error", f"bad value for {cmd}: {arg!r}")
+    return ("error", f"unknown command {cmd} — try /help")
+
+
+def repl(backend, opts: GenOpts) -> None:
+    try:
+        import readline  # noqa: F401  (line editing + history for input())
+    except ImportError:
+        pass
+    print("tinyllm chat — /help for commands, /q to quit")
+    while True:
+        try:
+            line = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not line:
+            continue
+        action, val = parse_slash(line, opts)
+        if action == "quit":
+            return
+        if action in ("ok", "error"):
+            print(val)
+            continue
+        try:
+            if action == "info":
+                print(backend.info(), end="")
+                continue
+            if action == "load":
+                print(backend.load(val), end="")
+                continue
+            try:
+                for chunk in backend.generate(val, opts):
+                    sys.stdout.write(chunk)
+                    sys.stdout.flush()
+            except KeyboardInterrupt:
+                backend.cancel()
+                print("\n(interrupted — a busy device finishes on its own; "
+                      "the next command waits for it)")
+                continue
+            st = backend.stats()
+            if st:
+                extra = f", {st.eff_mbs:.1f} MB/s" if st.eff_mbs else ""
+                print(f"\n{DIM}{st.tokens} tok, {st.tok_s:.2f} tok/s, "
+                      f"first {st.first_s:.2f}s{extra}{RESET}")
+            else:
+                print()
+        except BackendError as e:
+            print(f"error: {e}", file=sys.stderr)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="chat.py", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = ap.add_subparsers(dest="mode", required=True)
+    lp = sub.add_parser("local", help="run against the native tq_run binary")
+    lp.add_argument("model", help="path to a .etq model")
+    lp.add_argument(
+        "--tq-run",
+        default=str(Path(__file__).resolve().parents[1] / "host" / "build" / "tq_run"),
+        help="tq_run binary (default: host/build/tq_run)",
+    )
+    sp = sub.add_parser("serial", help="drive the Teensy over USB CDC")
+    sp.add_argument("port", help="serial device, e.g. /dev/cu.usbmodem12345")
+    sp.add_argument("--baud", type=int, default=115200)
+    args = ap.parse_args(argv)
+    backend = (
+        LocalBackend(args.tq_run, args.model)
+        if args.mode == "local"
+        else SerialBackend(args.port, args.baud)
+    )
+    try:
+        repl(backend, GenOpts())
+    finally:
+        backend.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
