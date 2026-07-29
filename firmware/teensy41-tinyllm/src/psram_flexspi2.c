@@ -38,6 +38,24 @@ LOG_MODULE_REGISTER(psram, CONFIG_TINYLLM_LOG_LEVEL);
 
 #define REG32(a) (*(volatile uint32_t *)(uintptr_t)(a))
 
+/* MIMXRT1062.h, pulled in through the Zephyr SoC headers, also defines the
+ * three peripheral base addresses below — same values, different spelling,
+ * which -Werror reports as a redefinition. Verify agreement, then take
+ * ownership of the names: this file's register map is authoritative here
+ * (decision D4 in docs/RESEARCH.md). */
+#if defined(CCM_BASE) && (CCM_BASE != 0x400FC000u)
+#error "SDK header disagrees with the PJRC-verified CCM base address"
+#endif
+#if defined(IOMUXC_BASE) && (IOMUXC_BASE != 0x401F8000u)
+#error "SDK header disagrees with the PJRC-verified IOMUXC base address"
+#endif
+#if defined(FLEXSPI2_BASE) && (FLEXSPI2_BASE != 0x402A4000u)
+#error "SDK header disagrees with the PJRC-verified FlexSPI2 base address"
+#endif
+#undef CCM_BASE
+#undef IOMUXC_BASE
+#undef FLEXSPI2_BASE
+
 #define CCM_BASE      0x400FC000u
 #define CCM_CBCMR     REG32(CCM_BASE + 0x018u)
 #define CCM_CCGR7     REG32(CCM_BASE + 0x084u)
