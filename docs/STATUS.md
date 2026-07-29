@@ -18,17 +18,18 @@ so nobody debugs the wrong layer.
 | The engine fits | **7,946 bytes** of Cortex-M7 `.text` at `-Os`, **0 bytes** of `.data` and `.bss`. Built with real `arm-none-eabi-gcc`. |
 | The Python exporter and the C parser agree | The C test suite parses a container the Python writer produced; struct layouts are pinned by `static_assert` on the C side and `struct.calcsize` on the Python side. |
 | The FlexSPI2 LUT encodings are right | All 13 command words machine-compared against the macros in PJRC's `imxrt.h`. Register addresses and bitfield positions taken from the same source. |
+| **The Zephyr firmware compiles and links** | `west build -b teensy41` passes in CI (first green: 2026-07-29) and uploads `zephyr.hex`/`zephyr.elf` as the `zephyr-hex` artifact, with `smlad` confirmed present in the image. The first builds surfaced and fixed: a wrong FatFS Kconfig symbol, an unsatisfiable `EXCEPTION_STACK_TRACE`, base-address macro collisions with the MCUX SDK header, a missing USBD-next device context (the CDC-ACM console had no instance at all), and the activation arena overflowing `zephyr,sram` — it now lives in the otherwise-unused 512 KB OCRAM2 (256 KB arena + 32 KB tile = 56% used; kernel RAM at 45% of 256 KB). |
+| **Both PSRAM chips enumerate — under PJRC's code** | 2× APS6404L-3SQR hand-soldered; PJRC's `teensy41_psram_memtest` reports 16 Mbyte and passes repeated pseudo-random sweeps at 88 MHz (2026-07-28). This validates the solder joints and chips, not this repo's driver. |
 
 ## Not verified — needs the hardware
 
 | Claim | Risk |
 |---|---|
-| **The Zephyr firmware compiles** | The build environment could not fetch Zephyr (the git proxy was scoped to one unrelated repo), so `west build -b teensy41` has never run. Expect to fix a header path or a Kconfig symbol name on the first attempt. `.github/workflows/ci.yml` runs this build on push, so the first push tells you. **This is the highest-probability thing to go wrong.** |
-| **PSRAM enumerates** | The bring-up sequence follows PJRC's known-good implementation and the LUT words are verified, but nothing has driven those pins. |
+| **PSRAM enumerates under this repo's driver** | The chips and joints are proven good by PJRC's memtest (see above), and the LUT words are verified, but `psram_flexspi2.c` itself has not driven the pins yet. |
 | **The clock sweep finds a high clock** | Entirely a property of your solder joints and your specific chips. |
 | **Predicted token rates** | Every number in [PERFORMANCE.md](PERFORMANCE.md) is a bandwidth model with one free parameter. `tinyllm psram bench` measures it and `tinyllm gen` reports achieved throughput, so the prediction is falsifiable in thirty seconds — but it has not been falsified or confirmed. |
 | **A real checkpoint converts correctly** | `tools/etq/convert.py` was written against the documented `llama2.c` and HuggingFace formats but never run on one — the sandbox could not reach HuggingFace. It is exercised end to end against a synthetic model with the same code path. Verify with step 10 of [BRINGUP.md](BRINGUP.md) (run the converted model on the host) before blaming the board. |
-| **USB CDC-ACM console comes up** | Standard Zephyr configuration for this SoC, but unexercised here. |
+| **USB CDC-ACM console comes up** | The USBD-next stack requires an application-defined device context, which the original firmware lacked entirely — `src/usb_console.c` now provides it (found at the first link: the chosen console had no device instance). Compiles and links; enumeration on real hardware is unexercised. |
 
 ## Known gaps in the implementation
 

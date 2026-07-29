@@ -101,7 +101,7 @@ sequential), so a 23 MB `stories42M` is resident in a little over a second.
 | **FlexSPI2 AHB prefetch** | Buffers 0 and 1 get the full 512 B with `PREFETCHEN`. Weight reads are perfectly sequential, so the prefetcher works ahead almost ideally. |
 | **Runtime clock sweep** | Up to 1.9× between the stock 88 MHz and a part that holds 166 MHz. Per-board, so it must be measured, not assumed. |
 | **`SMLAD` kernels** | 4 int8 MACs per two instructions. Not the bottleneck, but it keeps compute far enough back that it never becomes one. |
-| **Activations in DTCM** | Single-cycle access for the vectors touched thousands of times per token, while weights stream from the slow memory they only need once. |
+| **Activations in on-chip SRAM (OCRAM2)** | Fast AXI access for the vectors touched thousands of times per token, while weights stream from the slow memory they only need once. True single-cycle DTCM is only 128 KB in the default FlexRAM split — smaller than a 32k-vocab logit buffer — so moving the hot vectors there means repartitioning FlexRAM: unmeasured future work, bounded by the ~8% of each token the CPU isn't stalled on FlexSPI2. |
 | **One activation quantization per fan-out** | `xq` is computed once and consumed by wq/wk/wv; likewise for w1/w3. Free. |
 | **RoPE tables per token, not per head** | The rotation angles depend only on position, so 32 `sinf`/`cosf` calls per token replace a few thousand. |
 | **int8 KV cache** | 4× smaller than fp32 for ~5% of logit RMS in error. It is what lets a 1024-token context coexist with 24 MB of weights in 32 MB. |
