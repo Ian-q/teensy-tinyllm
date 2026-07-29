@@ -9,14 +9,15 @@ config TINYLLM_LOG_LEVEL
 	range 0 4
 
 config TINYLLM_FAST_ARENA_BYTES
-	int "DTCM arena for activations"
+	int "Activation arena bytes (OCRAM2)"
 	default 262144
 	help
 	  Holds every activation vector plus the logits. The logits alone are
 	  vocab_size * 4 bytes, which is 128 KB for a 32000-token Llama
 	  vocabulary, so this dominates. 256 KB comfortably fits a 32k-vocab
-	  model with a 1024-token context; shrink it if you are running a
-	  small-vocab model and want the DTCM back.
+	  model with a 1024-token context. Lives in the dedicated 512 KB
+	  OCRAM2, which the kernel does not use; DTCM would be faster but is
+	  only 128 KB in the default FlexRAM split.
 
 config TINYLLM_STREAM_TILE_BYTES
 	int "Bounce buffer for SD-streamed models"

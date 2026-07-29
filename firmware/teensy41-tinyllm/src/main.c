@@ -13,7 +13,7 @@
  *
  * Memory plan (32 MB PSRAM, 1 MB on-chip):
  *
- *   DTCM   activations + logits    ~150 KB   touched thousands of times/token
+ *   OCRAM2 activations + logits    ~150 KB   touched thousands of times/token
  *   PSRAM  model weights           8-30 MB   streamed once per token
  *   PSRAM  KV cache                1-9 MB    random access, but small
  *   PSRAB  sampler scratch          256 KB   touched once per token
@@ -38,11 +38,19 @@ LOG_MODULE_REGISTER(tinyllm, CONFIG_TINYLLM_LOG_LEVEL);
 
 /* ------------------------------------------------------------------ state */
 
-/* Activations live here. Static, so the linker puts it in whatever region the
- * board's `zephyr,sram` chosen node points at — DTCM on the Teensy 4.1. */
-static uint8_t fast_arena[CONFIG_TINYLLM_FAST_ARENA_BYTES] __aligned(32);
+/* Activations live in OCRAM2, the dedicated 512 KB SRAM the board definition
+ * leaves untouched. They cannot go where the original comment claimed:
+ * `zephyr,sram` is the 256 KB FlexRAM OCRAM, which must also hold the
+ * kernel (a 256 KB arena there overflows the link), and DTCM is only 128 KB
+ * in the default FlexRAM split — too small for a 32k-vocab logit buffer
+ * alone. Repartitioning FlexRAM to get the hot vectors into single-cycle
+ * DTCM is a later, measured optimization; decode is FlexSPI2-bound either
+ * way (docs/PERFORMANCE.md). */
+static uint8_t fast_arena[CONFIG_TINYLLM_FAST_ARENA_BYTES]
+	Z_GENERIC_SECTION(OCRAM2) __aligned(32);
 static uint8_t model_arena[4096];
-static uint8_t stream_tile[CONFIG_TINYLLM_STREAM_TILE_BYTES] __aligned(32);
+static uint8_t stream_tile[CONFIG_TINYLLM_STREAM_TILE_BYTES]
+	Z_GENERIC_SECTION(OCRAM2) __aligned(32);
 static char    tok_scratch[64];
 
 static TqStore     g_store;
@@ -169,7 +177,7 @@ static int finish_open(const struct shell *sh, int max_seq, int kv8)
 	fast_need = tq_runtime_bytes(&g_model, max_seq);
 	if (fast_need > sizeof(fast_arena)) {
 		shell_error(sh,
-			    "activations need %u KB but the DTCM arena is %u KB",
+			    "activations need %u KB but the arena is %u KB",
 			    (unsigned)(fast_need / 1024u),
 			    (unsigned)(sizeof(fast_arena) / 1024u));
 		shell_error(sh, "shorten the context with -c, or raise "
@@ -218,7 +226,7 @@ static int finish_open(const struct shell *sh, int max_seq, int kv8)
 	shell_print(sh, "psram: weights %u KB + kv %u KB + scratch %u KB",
 		    (unsigned)(g_model_bytes / 1024u), (unsigned)(kv_need / 1024u),
 		    (unsigned)(scratch_need / 1024u));
-	shell_print(sh, "dtcm : activations %u KB of %u KB",
+	shell_print(sh, "arena: activations %u KB of %u KB",
 		    (unsigned)(fast_need / 1024u),
 		    (unsigned)(sizeof(fast_arena) / 1024u));
 	return 0;
@@ -451,7 +459,7 @@ static int cmd_info(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "  kernel  : %s", tq_kernel_backend());
 	shell_print(sh, "  psram   : %u MB @ %u.%u MHz", pi->mbytes,
 		    pi->clock_hz / 1000000u, (pi->clock_hz / 100000u) % 10u);
-	shell_print(sh, "  arena   : %u KB dtcm, %u KB stream tile",
+	shell_print(sh, "  arena   : %u KB ocram2, %u KB stream tile",
 		    (unsigned)(sizeof(fast_arena) / 1024u),
 		    (unsigned)(sizeof(stream_tile) / 1024u));
 	if (g_loaded) {
