@@ -88,9 +88,10 @@ jobs:
 
       - name: Report footprint
         run: |
-          arm-zephyr-eabi-size build/zephyr/zephyr.elf
+          BIN="$ZEPHYR_SDK_INSTALL_DIR/arm-zephyr-eabi/bin"
+          "$BIN/arm-zephyr-eabi-size" build/zephyr/zephyr.elf
           echo "--- confirming the DSP kernels made it into the image"
-          arm-zephyr-eabi-objdump -d build/zephyr/zephyr.elf \
+          "$BIN/arm-zephyr-eabi-objdump" -d build/zephyr/zephyr.elf \
             | grep -c smlad \
             | xargs -I{} sh -c 'test {} -gt 0 || { echo "::error::no smlad in image"; exit 1; }; echo "smlad instructions: {}"'
 
