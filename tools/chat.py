@@ -83,34 +83,42 @@ def parse_stats_serial(text: str) -> GenStats | None:
 
 
 SHELL_CMD_MAX = 255  # CONFIG_SHELL_CMD_BUFF_SIZE=256, minus the NUL
-# cmd_gen loop: accepts word only when used + l + 2 < 192; worst case is single
-# word l + 2 < 192 => l <= 189. So 189-byte prompt is safe, 190+ is dropped.
+# The prompt reaches cmd_gen as a single quoted argv word (see
+# build_gen_command below), so only the single-word case of its buffering
+# loop applies: it accepts a word only when used + l + 2 < sizeof(prompt[192])
+# and used == 0 for the (only) word, so l + 2 < 192 => l <= 189.
 PROMPT_BUF_MAX = 189
 
 
 def build_gen_command(prompt: str, opts: GenOpts, seed: int) -> str:
-    """Build a `tinyllm gen` line. The firmware re-joins argv words with single
-    spaces and SILENTLY DROPS words that overflow its 192-byte prompt buffer,
-    so the caps live here, as errors. Also guards against reserved flag tokens
-    that the firmware would parse as options."""
+    """Build a `tinyllm gen` line. The pinned Zephyr shell's tokenizer caps
+    argv at SHELL_ARGC_MAX=20 (our 10 fixed flag tokens leave room for only
+    10 more bare words) and consumes `'` and `\\` while parsing — apostrophes
+    vanish and backslashes are eaten. Sending the prompt as ONE double-quoted
+    argv token sidesteps both: inside double quotes the tokenizer passes
+    spaces and apostrophes through literally, and cmd_gen sees a single word.
+    The firmware still SILENTLY DROPS a word that overflows its 192-byte
+    prompt buffer, so that cap lives here, as an error."""
     prompt = " ".join(prompt.split())
+    if not prompt:
+        raise BackendError("empty prompt")
     if '"' in prompt:
         raise BackendError(
             "the Zephyr shell parses double quotes; remove them from the prompt"
         )
-    words = prompt.split()
-    for word in words:
-        if word in ("-n", "-t", "-p", "-s"):
-            raise BackendError(
-                f"prompt contains reserved flag token '{word}'; "
-                "the firmware would read it as an option"
-            )
+    if "\\" in prompt:
+        raise BackendError(
+            "the Zephyr shell consumes backslashes; remove them from the prompt"
+        )
     nbytes = len(prompt.encode())
     if nbytes > PROMPT_BUF_MAX:
         raise BackendError(
             f"prompt is {nbytes} bytes; the firmware caps it at {PROMPT_BUF_MAX}"
         )
-    cmd = f"tinyllm gen -n {opts.n} -t {opts.temp:g} -p {opts.topp:g} -s {seed} {prompt}"
+    cmd = (
+        f'tinyllm gen -n {opts.n} -t {opts.temp:g} -p {opts.topp:g} '
+        f'-s {seed} "{prompt}"'
+    )
     nbytes = len(cmd.encode())
     if nbytes > SHELL_CMD_MAX:
         raise BackendError(
@@ -125,17 +133,31 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _ANSI_PARTIAL_RE = re.compile(r"\x1b(\[[0-9;]*)?\Z")
 PROMPT = "tinyllm> "
 FOOTER = "--"
-# Best-effort: the strings cmd_load/cmd_gen/cmd_stream emit via shell_error.
+# Verified against firmware/teensy41-tinyllm/src/main.c: every shell_error()
+# call site in cmd_gen/cmd_load/cmd_stream/cmd_info, by its literal prefix.
 ERROR_PREFIXES = (
     "usage:",
     "no model loaded",
     "no PSRAM",
     "encode:",
     "forward at",
-    "open:",
-    "load:",
-    "read:",
+    "model open:",
+    "load failed:",
+    "runtime:",
+    "KV cache",
+    "activations need",
+    "shorten the context",
+    "no usable clock",
 )
+
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # C0 controls + DEL, keeping \n and \t
+
+
+def _scrub(text: str) -> str:
+    """Model vocab and device output are untrusted; strip terminal-control
+    bytes (ESC starts OSC/CSI/DCS sequences, BEL, backspace, ...) before
+    they reach the user's terminal."""
+    return _CTRL_RE.sub("", text)
 
 _LOG_TPL = "[NN:NN:NN.NNN,NNN] <"
 
@@ -482,14 +504,14 @@ def repl(backend, opts: GenOpts) -> None:
             continue
         try:
             if action == "info":
-                print(backend.info(), end="")
+                print(_scrub(backend.info()), end="")
                 continue
             if action == "load":
-                print(backend.load(val), end="")
+                print(_scrub(backend.load(val)), end="")
                 continue
             try:
                 for chunk in backend.generate(val, opts):
-                    sys.stdout.write(chunk)
+                    sys.stdout.write(_scrub(chunk))
                     sys.stdout.flush()
             except KeyboardInterrupt:
                 backend.cancel()

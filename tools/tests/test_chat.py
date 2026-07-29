@@ -46,7 +46,7 @@ def test_parse_stats_serial():
 
 def test_build_gen_command():
     cmd = chat.build_gen_command("Once  upon a time", chat.GenOpts(n=64, temp=0.8), seed=7)
-    assert cmd == "tinyllm gen -n 64 -t 0.8 -p 0.9 -s 7 Once upon a time"
+    assert cmd == 'tinyllm gen -n 64 -t 0.8 -p 0.9 -s 7 "Once upon a time"'
 
 
 def test_build_gen_command_rejects_long_prompt():
@@ -84,17 +84,35 @@ def test_build_gen_command_rejects_191_byte_prompt():
         chat.build_gen_command("x" * 191, chat.GenOpts(), seed=1)
 
 
-def test_build_gen_command_rejects_flag_token():
+def test_build_gen_command_allows_11plus_word_prompt():
+    # No word-count ceiling now that the prompt is a single quoted argv token.
+    prompt = " ".join(f"word{i}" for i in range(15))
+    cmd = chat.build_gen_command(prompt, chat.GenOpts(), seed=1)
+    assert f'"{prompt}"' in cmd
+
+
+def test_build_gen_command_keeps_apostrophe():
+    cmd = chat.build_gen_command("don't stop", chat.GenOpts(), seed=1)
+    assert '"don\'t stop"' in cmd
+
+
+def test_build_gen_command_rejects_backslash():
     import pytest
 
-    with pytest.raises(chat.BackendError, match="reserved flag token"):
-        chat.build_gen_command("hello -t 0.5 world", chat.GenOpts(), seed=1)
+    with pytest.raises(chat.BackendError, match="backslash"):
+        chat.build_gen_command("a\\b", chat.GenOpts(), seed=1)
 
 
-def test_build_gen_command_allows_flag_like_word():
-    # Substring of flag like "t-shirts" is allowed (only exact matches rejected)
-    cmd = chat.build_gen_command("twenty -shirt t-shirts", chat.GenOpts(), seed=1)
-    assert "twenty" in cmd and "t-shirts" in cmd
+def test_build_gen_command_rejects_empty_prompt():
+    import pytest
+
+    with pytest.raises(chat.BackendError, match="empty prompt"):
+        chat.build_gen_command("   ", chat.GenOpts(), seed=1)
+
+
+def test_build_gen_command_flag_like_words_stay_inside_quotes():
+    cmd = chat.build_gen_command("hello -t 0.5 world", chat.GenOpts(), seed=1)
+    assert cmd.endswith('"hello -t 0.5 world"')
 
 
 GEN_BYTES = (
@@ -157,6 +175,18 @@ def test_framer_dash_prefixed_token_text():
     text, stats, errors, done = collect(run_framer(data, chunk=1))
     assert text == "--not a footer\n\n"
     assert len(stats) == 1 and done
+
+
+def test_framer_load_failed_is_error_not_text():
+    data = "tinyllm load bogus.etq\r\nload failed: -5\r\ntinyllm> "
+    text, stats, errors, done = collect(run_framer(data, expect_footer=False))
+    assert text == ""
+    assert errors == ["load failed: -5"]
+    assert done
+
+
+def test_scrub_strips_terminal_control_bytes():
+    assert chat._scrub("a\x1b]0;t\x07b\x08\ncd\te") == "a]0;tb\ncd\te"
 
 
 import pytest  # noqa: E402
@@ -335,6 +365,13 @@ def test_serial_backend_load():
     out = be.load("stories15M.etq")
     assert "done" in out
     assert be.transportless_written().startswith(b"tinyllm load stories15M.etq")
+
+
+def test_serial_backend_load_reports_model_open_error():
+    data = "echo\r\nmodel open: I/O error\r\ntinyllm> "
+    be = chat.SerialBackend(transport=FakeSerial([data]))
+    with pytest.raises(chat.BackendError, match="model open"):
+        be.load("bogus.etq")
 
 
 def test_parse_slash_gen_passthrough():

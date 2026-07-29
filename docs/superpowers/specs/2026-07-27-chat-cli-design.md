@@ -48,9 +48,13 @@ LocalBackend   subprocess: host/tq_run MODEL.etq -i <prompt> -n ... ;
                stdout = token stream (tq_run flushes per token),
                stderr = stats footer.
 SerialBackend  pyserial to the CDC ACM port; writes
-               `tinyllm gen -n N <prompt>`, discards the command echo,
+               `tinyllm gen -n N "<prompt>"`, discards the command echo,
                yields bytes as text until the `--` footer, parses the
-               stats line, resyncs on the `tinyllm> ` prompt.
+               stats line, resyncs on the `tinyllm> ` prompt. The prompt is
+               sent as a single double-quoted argv token: the pinned Zephyr
+               shell caps argv at SHELL_ARGC_MAX=20 tokens and its tokenizer
+               consumes bare `'` and `\`, so an unquoted multi-word prompt
+               can overflow argc or lose characters.
 ```
 
 Framing/parsing logic (echo stripping, footer detection, stats parsing,
@@ -64,8 +68,8 @@ testable without a serial port.
 - Slash commands: `/n`, `/t`, `/p`, `/s` set steps, temperature, top-p, seed
   (verified: `cmd_gen` and `tq_run` accept the identical flags); `/load
   <file>` sets the model path for subsequent spawns (local) or issues
-  `tinyllm load` (serial); `/info` passes through on serial and is a no-op
-  locally; `/q` quits.
+  `tinyllm load` (serial); `/info` passes through on serial and prints a
+  one-line backend description locally; `/q` quits.
 - Serial prompts are capped client-side to fit the tighter of the firmware's
   192-byte `cmd_gen` prompt buffer and the 256-byte `SHELL_CMD_BUFF_SIZE`,
   with an explicit error — the firmware silently drops overflowing words, so
