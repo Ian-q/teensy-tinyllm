@@ -243,6 +243,11 @@ static void test_format(TqModel *m)
 
 /* --------------------------------------------------------------- golden */
 
+/* Q4 and Q8 fixtures share the source weights but not the quantization
+ * error, so each model is scored against its own oracle. Selected in
+ * main() once the model's qtype is known. */
+static const float (*g_golden)[GOLDEN_VOCAB] = golden_logits;
+
 static void run_golden(TqRuntime *rt, const char *label)
 {
 	int step;
@@ -259,7 +264,7 @@ static void run_golden(TqRuntime *rt, const char *label)
 		}
 		for (i = 0; i < GOLDEN_VOCAB; i++) {
 			double got = (double)rt->logits[i];
-			double exp = (double)golden_logits[step][i];
+			double exp = (double)g_golden[step][i];
 			double rel = fabs(got - exp) / (fabs(exp) + 1e-3);
 
 			if (rel > worst) {
@@ -334,8 +339,8 @@ static void test_streaming(void)
 		}
 		for (i = 0; i < GOLDEN_VOCAB; i++) {
 			double d = fabs((double)rt.logits[i] -
-					(double)golden_logits[step][i]);
-			double rel = d / (fabs((double)golden_logits[step][i]) + 1e-3);
+					(double)g_golden[step][i]);
+			double rel = d / (fabs((double)g_golden[step][i]) + 1e-3);
 
 			if (rel > worst) {
 				worst = rel;
@@ -547,6 +552,8 @@ int main(int argc, char **argv)
 
 	test_format(&m);
 
+	g_golden = (m.qtype == TQ_DT_Q8_0) ? golden_logits_q8 : golden_logits;
+
 	fb = tq_runtime_bytes(&m, GOLDEN_STEPS);
 	cb = tq_kv_bytes(&m, GOLDEN_STEPS, TQ_KV_F32);
 	fast = malloc(fb);
@@ -582,14 +589,14 @@ int main(int argc, char **argv)
 				double ss = 0.0, rms;
 
 				for (i = 0; i < GOLDEN_VOCAB; i++) {
-					double g = (double)golden_logits[step][i];
+					double g = (double)g_golden[step][i];
 
 					ss += g * g;
 				}
 				rms = sqrt(ss / GOLDEN_VOCAB) + 1e-9;
 				for (i = 0; rc == TQ_OK && i < GOLDEN_VOCAB; i++) {
 					double d = fabs((double)rt8.logits[i] -
-							(double)golden_logits[step][i]);
+							(double)g_golden[step][i]);
 
 					if (d / rms > worst) {
 						worst = d / rms;

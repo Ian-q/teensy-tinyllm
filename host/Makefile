@@ -37,8 +37,9 @@ $(BUILD)/test_q8.etq: ../tools/etq/make_test_model.py ../tools/etq/format.py \
 	$(PY) -m etq.make_test_model --q8 $@
 
 # golden.h is committed; this target regenerates it after a numerics change.
-golden: $(BUILD)/test_q4.etq
-	$(PY) ../tools/gen_golden.py --model $< --out tests/golden.h
+golden: $(BUILD)/test_q4.etq $(BUILD)/test_q8.etq
+	$(PY) ../tools/gen_golden.py --model $(BUILD)/test_q4.etq \
+		--q8-model $(BUILD)/test_q8.etq --out tests/golden.h
 
 # --------------------------------------------------------------- native build
 
