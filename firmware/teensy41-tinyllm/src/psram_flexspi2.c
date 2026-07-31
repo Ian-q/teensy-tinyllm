@@ -60,6 +60,12 @@ LOG_MODULE_REGISTER(psram, CONFIG_TINYLLM_LOG_LEVEL);
 #define CCM_CBCMR     REG32(CCM_BASE + 0x018u)
 #define CCM_CCGR7     REG32(CCM_BASE + 0x084u)
 
+/* CCM analog (PLL/PFD) block. Our own names — the SDK header also covers
+ * these registers. */
+#define CCMA_BASE     0x400D8000u
+#define CCMA_PFD_480  REG32(CCMA_BASE + 0x0F0u)
+#define CCMA_PFD_528  REG32(CCMA_BASE + 0x100u)
+
 #define IOMUXC_BASE   0x401F8000u
 /* SW_MUX_CTL_PAD_GPIO_EMC_22 is at +0x06C; the eight pads we need are
  * consecutive 32-bit registers from there. Pad control mirrors them at
@@ -157,31 +163,57 @@ LOG_MODULE_REGISTER(psram, CONFIG_TINYLLM_LOG_LEVEL);
 /* ------------------------------------------------------------ clock table */
 
 struct clk_entry {
-	uint8_t  podf;
-	uint8_t  sel;
-	uint32_t hz;
+	uint8_t podf;
+	uint8_t sel;
 };
 
-/* CCM_CBCMR FLEXSPI2_PODF / FLEXSPI2_CLK_SEL combinations, ascending. */
+/* CCM_CBCMR FLEXSPI2_PODF / FLEXSPI2_CLK_SEL combinations. The comments are
+ * PJRC's nominal labels; the REAL frequency of the PFD-sourced rows depends
+ * on how the running OS programmed the fractions, so it is computed at
+ * runtime — under Zephyr, PLL3 PFD0 sits near 262 MHz, not PJRC's 664.6,
+ * which made "166.2 MHz" actually run (and bench) at ~65. */
 static const struct clk_entry clk_table[PSRAM_CLK_COUNT] = {
-	{ 5, 3,  88000000u },
-	{ 3, 0,  99000000u },
-	{ 6, 1, 102900000u },
-	{ 4, 3, 105600000u },
-	{ 5, 2, 110800000u },
-	{ 5, 1, 120000000u },
-	{ 3, 3, 132000000u },
-	{ 4, 1, 144000000u },
-	{ 3, 2, 166200000u },
-	{ 2, 3, 176000000u },
+	{ 5, 3 },   /*  88.0 with PLL2 (fixed, trustworthy)   */
+	{ 3, 0 },   /*  99.0 with PJRC's PLL2 PFD2 of 396     */
+	{ 6, 1 },   /* 102.9 with PLL3 PFD1 of 720            */
+	{ 4, 3 },   /* 105.6 with PLL2                        */
+	{ 5, 2 },   /* 110.8 with PJRC's PLL3 PFD0 of 664.6   */
+	{ 5, 1 },   /* 120.0 with PLL3 PFD1 of 720            */
+	{ 3, 3 },   /* 132.0 with PLL2                        */
+	{ 4, 1 },   /* 144.0 with PLL3 PFD1 of 720            */
+	{ 3, 2 },   /* 166.2 with PJRC's PLL3 PFD0 of 664.6   */
+	{ 2, 3 },   /* 176.0 with PLL2                        */
 };
+
+static uint32_t fs2_source_hz(uint8_t sel)
+{
+	uint32_t frac;
+
+	switch (sel) {
+	case 0u:   /* PLL2 PFD2 */
+		frac = (CCMA_PFD_528 >> 16) & 0x3Fu;
+		break;
+	case 1u:   /* PLL3 PFD1 */
+		frac = (CCMA_PFD_480 >> 8) & 0x3Fu;
+		break;
+	case 2u:   /* PLL3 PFD0 */
+		frac = CCMA_PFD_480 & 0x3Fu;
+		break;
+	default:   /* PLL2, fixed */
+		return 528000000u;
+	}
+	if (frac == 0u) {
+		return 0u;
+	}
+	return (uint32_t)(((uint64_t)(sel == 0u ? 528000000u : 480000000u) * 18u) / frac);
+}
 
 uint32_t psram_clock_hz(int index)
 {
 	if (index < 0 || index >= PSRAM_CLK_COUNT) {
 		return 0u;
 	}
-	return clk_table[index].hz;
+	return fs2_source_hz(clk_table[index].sel) / ((uint32_t)clk_table[index].podf + 1u);
 }
 
 static struct psram_info g_info;
@@ -389,7 +421,7 @@ int psram_init(int clock_index)
 
 	memset(&g_info, 0, sizeof(g_info));
 	g_info.clock_index = (uint8_t)clock_index;
-	g_info.clock_hz = clk_table[clock_index].hz;
+	g_info.clock_hz = psram_clock_hz(clock_index);
 
 	fs2_pins();
 	fs2_clock(clock_index);
@@ -533,22 +565,49 @@ uint32_t psram_memtest(uint32_t off, size_t bytes, bool quick)
 
 int psram_clock_sweep(int max_index)
 {
+	int order[PSRAM_CLK_COUNT];
+	uint32_t best_mb = 0u;
 	int best = -1;
-	int i;
+	int i, j, n = 0;
 
 	if (max_index < 0 || max_index >= PSRAM_CLK_COUNT) {
 		max_index = PSRAM_CLK_COUNT - 1;
 	}
 
+	/* Walk the clocks in ascending REAL frequency. The table's nominal
+	 * order is only sorted under PJRC's PFD programming; under Zephyr's
+	 * it is not even monotonic. */
 	for (i = 0; i <= max_index; i++) {
+		order[n++] = i;
+	}
+	for (i = 1; i < n; i++) {
+		for (j = i; j > 0 && psram_clock_hz(order[j]) <
+				     psram_clock_hz(order[j - 1]); j--) {
+			int t = order[j];
+
+			order[j] = order[j - 1];
+			order[j - 1] = t;
+		}
+	}
+
+	for (i = 0; i < n; i++) {
+		int idx = order[i];
+		uint32_t hz = psram_clock_hz(idx);
 		uint32_t mb, bad, kbps;
 		size_t test_bytes;
 
-		mb = (uint32_t)psram_init(i);
-		if (mb == 0u) {
-			LOG_WRN("%u.%u MHz: chip did not enumerate",
-				clk_table[i].hz / 1000000u,
-				(clk_table[i].hz / 100000u) % 10u);
+		mb = (uint32_t)psram_init(idx);
+		if (mb == 0u || mb < best_mb) {
+			/* Enumerating fewer chips than a slower clock did is
+			 * a failure, not a smaller success — losing CS1 at
+			 * speed must not count as "pass". */
+			LOG_WRN("%3u.%u MHz: %s", hz / 1000000u,
+				(hz / 100000u) % 10u,
+				mb == 0u ? "chip did not enumerate"
+					 : "capacity shrank — not stable");
+			if (best >= 0) {
+				break;
+			}
 			continue;
 		}
 
@@ -560,11 +619,12 @@ int psram_clock_sweep(int max_index)
 		kbps = psram_bench_read(0u, 512u * 1024u);
 
 		LOG_INF("%3u.%u MHz: %s  read %u.%u MB/s",
-			clk_table[i].hz / 1000000u, (clk_table[i].hz / 100000u) % 10u,
+			hz / 1000000u, (hz / 100000u) % 10u,
 			bad ? "FAIL" : "pass", kbps / 1000u, (kbps / 100u) % 10u);
 
 		if (bad == 0u) {
-			best = i;
+			best = idx;
+			best_mb = mb;
 		} else if (best >= 0) {
 			/* Once it starts failing it will keep failing; stop
 			 * hammering a part that is already out of spec. */
@@ -578,6 +638,7 @@ int psram_clock_sweep(int max_index)
 	}
 	psram_init(best);
 	LOG_INF("settled on %u.%u MHz",
-		clk_table[best].hz / 1000000u, (clk_table[best].hz / 100000u) % 10u);
+		psram_clock_hz(best) / 1000000u,
+		(psram_clock_hz(best) / 100000u) % 10u);
 	return best;
 }

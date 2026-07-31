@@ -18,9 +18,11 @@
 
 /* Clock options, in the order psram_clock_hz()/psram_init() index them.
  * Derived from the FlexSPI2 PODF/CLK_SEL table in the RT1062 reference manual
- * (CCM_CBCMR). Index 3 (105.6 MHz) is what Teensyduino 1.60 ships as default;
- * index 6 (132 MHz) is the fastest the 16 MB ISSI parts are documented to hold
- * and is what `psram sweep` usually lands on. */
+ * (CCM_CBCMR). The enum names carry PJRC's NOMINAL labels; rows sourced from
+ * a PLL PFD run at whatever fraction the OS programmed (Zephyr's differ from
+ * PJRC's), so psram_clock_hz() computes the real value from the CCM_ANALOG
+ * registers at runtime. Index 3 (105.6 MHz, PLL2-based and therefore exact)
+ * is what Teensyduino 1.60 ships as default. */
 enum {
 	PSRAM_CLK_88   = 0,
 	PSRAM_CLK_99   = 1,
