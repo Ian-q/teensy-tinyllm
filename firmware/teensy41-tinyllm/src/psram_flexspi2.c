@@ -100,6 +100,12 @@ LOG_MODULE_REGISTER(psram, CONFIG_TINYLLM_LOG_LEVEL);
 
 #define MCR0_AHBGRANTWAIT(n) (((uint32_t)(n) & 0xFFu) << 24)
 #define MCR0_IPGRANTWAIT(n)  (((uint32_t)(n) & 0xFFu) << 16)
+#define MCR0_SCKFREERUNEN    (1u << 14)
+#define MCR0_COMBINATIONEN   (1u << 13)
+#define MCR0_DOZEEN          (1u << 12)
+#define MCR0_HSEN            (1u << 11)
+#define MCR0_ATDFEN          (1u << 7)
+#define MCR0_ARDFEN          (1u << 6)
 #define MCR0_RXCLKSRC(n)     (((uint32_t)(n) & 0x03u) << 4)
 #define MCR0_MDIS            (1u << 1)
 #define MCR0_SWRESET         (1u << 0)
@@ -289,8 +295,15 @@ static void fs2_clock(int index)
 static void fs2_controller(void)
 {
 	FS2_MCR0 |= MCR0_MDIS;
+	/* Clear the same set PJRC does — critically ATDFEN and ARDFEN, which
+	 * RESET TO 1 (MCR0 reset value ends 0xC2) and route the IP TX/RX
+	 * FIFOs to DMA. With ARDFEN left set, RFDR reads return zeros while
+	 * IPCMDDONE still completes, so every chip "answers" id 0x00000000
+	 * and a perfectly soldered board probes as empty. */
 	FS2_MCR0 = (FS2_MCR0 & ~(MCR0_AHBGRANTWAIT(0xFF) | MCR0_IPGRANTWAIT(0xFF) |
-				 MCR0_RXCLKSRC(3) | MCR0_SWRESET)) |
+				 MCR0_SCKFREERUNEN | MCR0_COMBINATIONEN |
+				 MCR0_DOZEEN | MCR0_HSEN | MCR0_ATDFEN |
+				 MCR0_ARDFEN | MCR0_RXCLKSRC(3) | MCR0_SWRESET)) |
 		   MCR0_AHBGRANTWAIT(0xFF) | MCR0_IPGRANTWAIT(0xFF) |
 		   MCR0_RXCLKSRC(1) | MCR0_MDIS;
 	FS2_MCR1 = MCR1_SEQWAIT(0xFFFF) | MCR1_AHBBUSWAIT(0xFFFF);
