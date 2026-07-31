@@ -28,7 +28,7 @@ so nobody debugs the wrong layer.
 |---|---|
 | **The clock sweep finds a high clock** | Entirely a property of your solder joints and your specific chips. |
 | **Predicted token rates** | Every number in [PERFORMANCE.md](PERFORMANCE.md) is a bandwidth model with one free parameter. `tinyllm psram bench` measures it and `tinyllm gen` reports achieved throughput, so the prediction is falsifiable in thirty seconds — but it has not been falsified or confirmed. |
-| **A real checkpoint converts correctly** | `tools/etq/convert.py` was written against the documented `llama2.c` and HuggingFace formats but never run on one — the sandbox could not reach HuggingFace. It is exercised end to end against a synthetic model with the same code path. Verify with step 10 of [BRINGUP.md](BRINGUP.md) (run the converted model on the host) before blaming the board. |
+| **A real checkpoint converts correctly** *(moved to verified 2026-07-31)* | `convert.py llama2c` run on the real `stories15M.bin` + llama2.c `tokenizer.bin`: 9.12 MB Q4 file, and `tq_run` generates coherent TinyStories English from it on the host. The HuggingFace/safetensors path remains exercised only against the synthetic fixture. |
 | **USB CDC-ACM console comes up** | The USBD-next stack requires an application-defined device context, which the original firmware lacked entirely — `src/usb_console.c` now provides it (found at the first link: the chosen console had no device instance). Compiles and links; enumeration on real hardware is unexercised. |
 
 ## Known gaps in the implementation
