@@ -15,6 +15,7 @@ target_sources(app PRIVATE
     src/main.c
     src/usb_console.c
     src/usb_reboot.c
+    src/fault_capture.c
     src/psram_flexspi2.c
     src/model_store.c
     ${TQ_CORE_SRC}

@@ -21,10 +21,20 @@ static size_t tq_align_up(size_t v, size_t a)
 	return (v + a - 1u) & ~(a - 1u);
 }
 
-/* Carve `bytes` out of an arena, 16-byte aligned. Returns NULL when full. */
+/*
+ * Carve `bytes` out of an arena at a 16-byte-aligned ADDRESS. Returns NULL
+ * when full.
+ *
+ * Aligning the offset is not enough: callers hand us plain `uint8_t[]`
+ * arrays, and a 16-byte offset from a 2-byte-aligned base is still 2-byte
+ * aligned. The structures carved here hold uint64_t, which the M7 loads
+ * with LDRD — that faults on a misaligned address. (A host caller never
+ * saw this because malloc is already 16-byte aligned.)
+ */
 static void *tq_carve(uint8_t *base, size_t cap, size_t *used, size_t bytes)
 {
-	size_t off = tq_align_up(*used, 16u);
+	size_t skew = (size_t)((uintptr_t)base & 15u);
+	size_t off = tq_align_up(*used + skew, 16u) - skew;
 
 	if (off + bytes > cap) {
 		return NULL;

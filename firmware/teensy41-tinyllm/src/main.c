@@ -48,7 +48,10 @@ LOG_MODULE_REGISTER(tinyllm, CONFIG_TINYLLM_LOG_LEVEL);
  * way (docs/PERFORMANCE.md). */
 static uint8_t fast_arena[CONFIG_TINYLLM_FAST_ARENA_BYTES]
 	Z_GENERIC_SECTION(OCRAM2) __aligned(32);
-static uint8_t model_arena[4096];
+/* 8 at minimum — the parser carves uint64_t structures out of this, which
+ * the M7 reads with LDRD. tq_carve compensates for a skewed base now, but a
+ * plain uint8_t[] landing on an odd address is worth not relying on. */
+static uint8_t model_arena[4096] __aligned(16);
 static uint8_t stream_tile[CONFIG_TINYLLM_STREAM_TILE_BYTES]
 	Z_GENERIC_SECTION(OCRAM2) __aligned(32);
 static char    tok_scratch[64];
@@ -164,14 +167,11 @@ static int finish_open(const struct shell *sh, int max_seq, int kv8)
 	size_t fast_need, kv_need, scratch_need;
 	int rc;
 
-	/* TEMP diagnostic breadcrumbs — remove once the first-model hang is fixed */
-	shell_print(sh, "[open: parsing]");
 	rc = tq_model_open(&g_model, &g_store, model_arena, sizeof(model_arena));
 	if (rc != TQ_OK) {
 		shell_error(sh, "model open: %s", tq_strerror(rc));
 		return -EINVAL;
 	}
-	shell_print(sh, "[open: model ok]");
 
 	if (max_seq <= 0 || max_seq > g_model.seq_len) {
 		max_seq = g_model.seq_len;
@@ -213,11 +213,9 @@ static int finish_open(const struct shell *sh, int max_seq, int kv8)
 		shell_error(sh, "runtime: %s", tq_strerror(rc));
 		return -ENOMEM;
 	}
-	shell_print(sh, "[open: runtime ok]");
 
 	g_have_tok = (tq_tokenizer_init(&g_tok, &g_model, tok_scratch,
 					sizeof(tok_scratch)) == TQ_OK);
-	shell_print(sh, "[open: tok %d]", (int)g_have_tok);
 	g_loaded = true;
 
 	shell_print(sh, "");
@@ -319,10 +317,8 @@ static int cmd_stream(const struct shell *sh, size_t argc, char **argv)
 	path[sizeof(path) - 1] = '\0';
 
 	g_loaded = false;
-	shell_print(sh, "[stream: opening store]");
 	rc = model_open_streaming(path, &g_store, stream_tile,
 				  sizeof(stream_tile), &g_model_bytes);
-	shell_print(sh, "[stream: store rc=%d]", rc);
 	if (rc != 0) {
 		return rc;
 	}
@@ -388,7 +384,6 @@ static int cmd_gen(const struct shell *sh, size_t argc, char **argv)
 	toks = (int32_t *)(uintptr_t)(PSRAM_BASE + g_scratch_off +
 				      (uint32_t)g_model.vocab_size * 8u);
 
-	shell_print(sh, "[gen: encoding]");
 	if (g_have_tok) {
 		n_prompt = tq_encode(&g_tok, prompt, 1, 0, toks, g_rt.max_seq);
 		if (n_prompt < 0) {
@@ -399,17 +394,13 @@ static int cmd_gen(const struct shell *sh, size_t argc, char **argv)
 		toks[0] = (int32_t)g_model.hdr.bos_token;
 		n_prompt = 1;
 	}
-	shell_print(sh, "[gen: encoded %d]", n_prompt);
 
 	bytes0 = g_rt.bytes_read;
 	token = (int)toks[0];
 	t0 = k_uptime_get();
 
 	for (pos = 0; pos < steps; pos++) {
-		int rc;
-
-		shell_fprintf(sh, SHELL_NORMAL, "[f%d]", pos);
-		rc = tq_forward(&g_rt, token, pos);
+		int rc = tq_forward(&g_rt, token, pos);
 
 		if (rc != TQ_OK) {
 			shell_error(sh, "\nforward at pos %d: %s", pos,
