@@ -44,6 +44,12 @@ static uint8_t stage_buf[STAGE_BYTES] __nocache __aligned(32);
 int model_sd_mount(void)
 {
 	static const char *disk = "SD";
+
+	/* The .nocache section is NOLOAD — never zeroed at boot — so the
+	 * FATFS struct starts as stack garbage unless cleared here. */
+	if (!mounted) {
+		memset(&fat_fs, 0, sizeof(fat_fs));
+	}
 	uint32_t block_count = 0, block_size = 0;
 	int rc;
 
