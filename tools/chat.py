@@ -198,8 +198,13 @@ class ShellFramer:
     footer (two stats lines after `--`) -> tail (discard until the prompt).
     """
 
-    def __init__(self, expect_footer: bool = True):
+    def __init__(self, expect_footer: bool = True, echo: str = ""):
         self.expect_footer = expect_footer
+        # The shell echoes what we typed, wrapped at its terminal width, so
+        # the echo can span several lines. Consume lines while they remain a
+        # prefix of what we sent; anything else is already output.
+        self.echo_expect = echo
+        self.echo_seen = ""
         self.state = "echo"
         self.buf = ""
         self.raw = ""  # unstripped bytes withheld until a partial ANSI code resolves
@@ -218,7 +223,11 @@ class ShellFramer:
                 nl = self.buf.find("\n")
                 if nl < 0:
                     return out
-                self.buf = self.buf[nl + 1 :]
+                line, self.buf = self.buf[:nl], self.buf[nl + 1 :]
+                self.echo_seen += line
+                if (self.echo_expect.startswith(self.echo_seen)
+                        and len(self.echo_seen) < len(self.echo_expect)):
+                    continue        # wrapped mid-echo, more to come
                 self.state = "stream"
                 continue
             nl = self.buf.find("\n")
@@ -384,7 +393,7 @@ class SerialBackend:
             self._resync()
         self._drain()
         self.ser.write((cmdline + "\n").encode())
-        fr = ShellFramer(expect_footer=expect_footer)
+        fr = ShellFramer(expect_footer=expect_footer, echo=cmdline)
         deadline = time.monotonic() + first_timeout
         # Deferred until "done" (or the deadline): the framer can emit "error"
         # and "done" in the same feed() batch (the common

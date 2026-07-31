@@ -115,8 +115,10 @@ def test_build_gen_command_flag_like_words_stay_inside_quotes():
     assert cmd.endswith('"hello -t 0.5 world"')
 
 
+GEN_CMD = 'tinyllm gen -n 4 -t 0.9 -p 0.9 -s 7 "Once"'
+
 GEN_BYTES = (
-    "tinyllm gen -n 4 -t 0.9 -p 0.9 -s 7 Once\r\n"  # echo
+    GEN_CMD + "\r\n"  # echo, exactly as the shell sends it back
     "Once upon a time there was a pony.\n"
     "[00:00:01.123,456] <inf> tinyllm: something\r\n"
     "\r\n--\r\n" + SERIAL_FOOTER.replace("\n", "\r\n") + "tinyllm> "
