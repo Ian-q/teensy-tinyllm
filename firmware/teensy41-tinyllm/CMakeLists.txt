@@ -14,6 +14,7 @@ file(GLOB TQ_CORE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../core/src/*.c)
 target_sources(app PRIVATE
     src/main.c
     src/usb_console.c
+    src/usb_reboot.c
     src/psram_flexspi2.c
     src/model_store.c
     ${TQ_CORE_SRC}
