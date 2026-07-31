@@ -1,8 +1,9 @@
 # What is proven, and what is not
 
-This project was built and verified without a Teensy 4.1 physically present.
-That is a real limitation and this page states exactly where the line falls,
-so nobody debugs the wrong layer.
+This project was written without a Teensy 4.1 present and first met real
+hardware on 2026-07-31. It now runs end to end: a quantized Llama generates
+TinyStories prose from hand-soldered PSRAM. This page records what is proven
+by execution and what still is not, so nobody debugs the wrong layer.
 
 ## Verified by execution
 
@@ -21,6 +22,9 @@ so nobody debugs the wrong layer.
 | **The Zephyr firmware compiles and links** | `west build -b teensy41` passes in CI (first green: 2026-07-29) and uploads `zephyr.hex`/`zephyr.elf` as the `zephyr-hex` artifact, with `smlad` confirmed present in the image. The first builds surfaced and fixed: a wrong FatFS Kconfig symbol, an unsatisfiable `EXCEPTION_STACK_TRACE`, base-address macro collisions with the MCUX SDK header, a missing USBD-next device context (the CDC-ACM console had no instance at all), and the activation arena overflowing `zephyr,sram` — it now lives in the otherwise-unused 512 KB OCRAM2 (256 KB arena + 32 KB tile = 56% used; kernel RAM at 45% of 256 KB). |
 | **Both PSRAM chips enumerate — under PJRC's code** | 2× APS6404L-3SQR hand-soldered; PJRC's `teensy41_psram_memtest` reports 16 Mbyte and passes repeated pseudo-random sweeps at 88 MHz (2026-07-28). This validates the solder joints and chips, not this repo's driver. |
 | **This repo's driver runs the chips, measured** | On the real board (2026-07-31): 16 MB across both chips, ids `0x32535d0d`. First contact found two driver bugs — MCR0's ATDFEN/ARDFEN reset to 1 and routed the IP RX FIFO to DMA (every ID read returned zeros), and the clock table assumed PJRC's PLL-PFD programming while Zephyr's differs (rows labeled 166 MHz really ran at ~65). Frequencies are now computed from the live CCM_ANALOG registers. Sweep result: clean linear scaling 13.2→31.3 MB/s from 41→105.6 MHz, **settled at 105.6 MHz / 31.4 MB/s sustained read** (the model predicted 34 — 92% achieved). CS1 drops out at ~120 MHz real; the sweep now counts that as failure, not an 8 MB "pass". Boot default (index 3) is already this board's optimum. |
+| **THE WHOLE THING RUNS** *(2026-07-31)* | `stories15M.etq` loads from SD into PSRAM and generates coherent TinyStories prose on the Teensy: **2.98 tok/s, 309 ms to first token, 8.3 MB read/token, 25.5 MB/s effective**. Bring-up found five real defects — MCR0 ATDFEN/ARDFEN (PSRAM read as absent), a clock table assuming PJRC's PFD programming, a missing USBD device context, SD DMA into cacheable buffers, and a `tq_carve` alignment bug that faulted the parser. |
+| **A real checkpoint converts correctly** *(2026-07-31)* | `convert.py llama2c` run on the real `stories15M.bin` + llama2.c `tokenizer.bin`: 9.12 MB Q4 file, and `tq_run` generates coherent TinyStories English from it on the host. The HuggingFace/safetensors path remains exercised only against the synthetic fixture. |
+| **USB CDC-ACM console comes up** *(verified)* | Enumerates on macOS as `/dev/cu.usbmodem*`; the shell, `psram`, `load`, and `gen` all drive over it. `src/usb_console.c` supplies the device context the USBD-next stack requires and the original firmware lacked. `src/usb_reboot.c` adds PJRC's baud-134 convention, so reflashing needs no button — except after a hang, when nothing services the poll. |
 
 ## Not verified — needs the hardware
 
@@ -28,9 +32,6 @@ so nobody debugs the wrong layer.
 |---|---|
 | **The clock sweep finds a high clock** | Entirely a property of your solder joints and your specific chips. |
 | **Predicted token rates** | Every number in [PERFORMANCE.md](PERFORMANCE.md) is a bandwidth model with one free parameter. `tinyllm psram bench` measures it and `tinyllm gen` reports achieved throughput, so the prediction is falsifiable in thirty seconds — but it has not been falsified or confirmed. |
-| **THE WHOLE THING RUNS** *(2026-07-31)* | `stories15M.etq` loads from SD into PSRAM and generates coherent TinyStories prose on the Teensy: **2.98 tok/s, 309 ms to first token, 8.3 MB read/token, 25.5 MB/s effective**. Bring-up found five real defects — MCR0 ATDFEN/ARDFEN (PSRAM read as absent), a clock table assuming PJRC's PFD programming, a missing USBD device context, SD DMA into cacheable buffers, and a `tq_carve` alignment bug that faulted the parser. |
-| **A real checkpoint converts correctly** *(2026-07-31)* | `convert.py llama2c` run on the real `stories15M.bin` + llama2.c `tokenizer.bin`: 9.12 MB Q4 file, and `tq_run` generates coherent TinyStories English from it on the host. The HuggingFace/safetensors path remains exercised only against the synthetic fixture. |
-| **USB CDC-ACM console comes up** *(verified)* | Enumerates on macOS as `/dev/cu.usbmodem*`; the shell, `psram`, `load`, and `gen` all drive over it. `src/usb_console.c` supplies the device context the USBD-next stack requires and the original firmware lacked. `src/usb_reboot.c` adds PJRC's baud-134 convention, so reflashing needs no button — except after a hang, when nothing services the poll. |
 
 ## Known gaps in the implementation
 
