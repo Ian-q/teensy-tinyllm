@@ -54,6 +54,13 @@ replace the estimate with the real number. `tinyllm gen` then reports achieved
 effective MB/s next to the token rate, so the prediction is falsifiable in
 about thirty seconds.
 
+**Measured (first board, 2× APS6404L-3SQR, 2026-07-31):** 31.4 MB/s
+sustained read at 105.6 MHz — 92% of the 34 MB/s the table assumes for that
+clock, scaling linearly from 13.2 MB/s at 41 MHz. The higher columns are out
+of reach on this board: CS1 drops off the bus around 120 MHz real, and
+nothing enumerates at 132+. Predicted `stories15M` rate at the measured
+bandwidth: ~3.7 tok/s.
+
 ## Where the bytes actually go
 
 For `stories15M` (dim 288, 6 layers, vocab 32000):
