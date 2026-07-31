@@ -193,11 +193,11 @@ static uint32_t fs2_source_hz(uint8_t sel)
 	case 0u:   /* PLL2 PFD2 */
 		frac = (CCMA_PFD_528 >> 16) & 0x3Fu;
 		break;
-	case 1u:   /* PLL3 PFD1 */
-		frac = (CCMA_PFD_480 >> 8) & 0x3Fu;
-		break;
-	case 2u:   /* PLL3 PFD0 */
+	case 1u:   /* PLL3 PFD0 (RM 14.7.6: CBCMR[FLEXSPI2_CLK_SEL]=01) */
 		frac = CCMA_PFD_480 & 0x3Fu;
+		break;
+	case 2u:   /* PLL3 PFD1 (CBCMR[FLEXSPI2_CLK_SEL]=10) */
+		frac = (CCMA_PFD_480 >> 8) & 0x3Fu;
 		break;
 	default:   /* PLL2, fixed */
 		return 528000000u;
