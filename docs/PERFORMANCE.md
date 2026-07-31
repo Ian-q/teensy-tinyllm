@@ -58,8 +58,12 @@ about thirty seconds.
 sustained read at 105.6 MHz — 92% of the 34 MB/s the table assumes for that
 clock, scaling linearly from 13.2 MB/s at 41 MHz. The higher columns are out
 of reach on this board: CS1 drops off the bus around 120 MHz real, and
-nothing enumerates at 132+. Predicted `stories15M` rate at the measured
-bandwidth: ~3.7 tok/s.
+nothing enumerates at 132+. **Measured end to end:** `stories15M` decodes at **2.98 tok/s** (64 tokens,
+309 ms to first token), reading 8.3 MB of weights per token at **25.5 MB/s
+effective** — 81% of the sequential bench. The missing fifth is real traffic
+the bench does not model: the counter tracks weight bytes only, while the KV
+cache and the 250 KB sampler scratch share the same bus with random access.
+The engine is bandwidth-bound exactly as this page predicted.
 
 ## Where the bytes actually go
 

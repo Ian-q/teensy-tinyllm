@@ -28,8 +28,9 @@ so nobody debugs the wrong layer.
 |---|---|
 | **The clock sweep finds a high clock** | Entirely a property of your solder joints and your specific chips. |
 | **Predicted token rates** | Every number in [PERFORMANCE.md](PERFORMANCE.md) is a bandwidth model with one free parameter. `tinyllm psram bench` measures it and `tinyllm gen` reports achieved throughput, so the prediction is falsifiable in thirty seconds — but it has not been falsified or confirmed. |
-| **A real checkpoint converts correctly** *(moved to verified 2026-07-31)* | `convert.py llama2c` run on the real `stories15M.bin` + llama2.c `tokenizer.bin`: 9.12 MB Q4 file, and `tq_run` generates coherent TinyStories English from it on the host. The HuggingFace/safetensors path remains exercised only against the synthetic fixture. |
-| **USB CDC-ACM console comes up** | The USBD-next stack requires an application-defined device context, which the original firmware lacked entirely — `src/usb_console.c` now provides it (found at the first link: the chosen console had no device instance). Compiles and links; enumeration on real hardware is unexercised. |
+| **THE WHOLE THING RUNS** *(2026-07-31)* | `stories15M.etq` loads from SD into PSRAM and generates coherent TinyStories prose on the Teensy: **2.98 tok/s, 309 ms to first token, 8.3 MB read/token, 25.5 MB/s effective**. Bring-up found five real defects — MCR0 ATDFEN/ARDFEN (PSRAM read as absent), a clock table assuming PJRC's PFD programming, a missing USBD device context, SD DMA into cacheable buffers, and a `tq_carve` alignment bug that faulted the parser. |
+| **A real checkpoint converts correctly** *(2026-07-31)* | `convert.py llama2c` run on the real `stories15M.bin` + llama2.c `tokenizer.bin`: 9.12 MB Q4 file, and `tq_run` generates coherent TinyStories English from it on the host. The HuggingFace/safetensors path remains exercised only against the synthetic fixture. |
+| **USB CDC-ACM console comes up** *(verified)* | Enumerates on macOS as `/dev/cu.usbmodem*`; the shell, `psram`, `load`, and `gen` all drive over it. `src/usb_console.c` supplies the device context the USBD-next stack requires and the original firmware lacked. `src/usb_reboot.c` adds PJRC's baud-134 convention, so reflashing needs no button — except after a hang, when nothing services the poll. |
 
 ## Known gaps in the implementation
 
