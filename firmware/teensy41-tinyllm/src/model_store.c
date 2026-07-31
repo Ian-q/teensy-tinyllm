@@ -18,7 +18,13 @@ LOG_MODULE_REGISTER(model_store, CONFIG_TINYLLM_LOG_LEVEL);
 
 #define SD_MOUNT "/SD:"
 
-static FATFS fat_fs;
+/* Everything the USDHC ADMA engine writes must be non-cacheable: the v4.0
+ * driver does no cache maintenance on data buffers, so a cacheable target
+ * serves stale lines to the CPU afterwards (this corrupted the first real
+ * model image in transit). That covers the staging buffer below and FATFS
+ * itself — its embedded sector window is the DMA target for all metadata
+ * and small/unaligned reads. */
+static FATFS fat_fs __nocache;
 static struct fs_mount_t mp = {
 	.type = FS_FATFS,
 	.fs_data = &fat_fs,
@@ -33,7 +39,7 @@ static bool mounted;
  * full matrix row: 32 KB covers a 4096-wide Q8_0 row with room to spare.
  */
 #define STAGE_BYTES (32u * 1024u)
-static uint8_t stage_buf[STAGE_BYTES] __aligned(32);
+static uint8_t stage_buf[STAGE_BYTES] __nocache __aligned(32);
 
 int model_sd_mount(void)
 {
@@ -165,14 +171,18 @@ static int stream_read(void *ctx, uint64_t off, void *dst, uint32_t nbytes)
 	if (fs_seek(&stream_file, (off_t)off, FS_SEEK_SET) != 0) {
 		rc = -EIO;
 	}
+	/* Bounce through the non-cacheable staging buffer: the engine hands
+	 * this callback arbitrary (cacheable) destinations, which must never
+	 * be DMA targets — see the note above fat_fs. */
 	while (rc == 0 && done < nbytes) {
-		ssize_t got = fs_read(&stream_file, (uint8_t *)dst + done,
-				      nbytes - done);
+		uint32_t want = MIN(STAGE_BYTES, nbytes - done);
+		ssize_t got = fs_read(&stream_file, stage_buf, want);
 
 		if (got <= 0) {
 			rc = -EIO;
 			break;
 		}
+		memcpy((uint8_t *)dst + done, stage_buf, (size_t)got);
 		done += (uint32_t)got;
 	}
 	k_mutex_unlock(&stream_lock);
