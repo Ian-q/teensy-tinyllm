@@ -22,7 +22,7 @@ BUILD     := build
 
 .PHONY: all test test-arm run fixtures golden size-m7 clean
 
-all: $(BUILD)/tq_run $(BUILD)/test_all
+all: $(BUILD)/tq_run $(BUILD)/tq_sem $(BUILD)/test_all
 
 # ------------------------------------------------------------------ fixtures
 
@@ -48,6 +48,12 @@ $(BUILD):
 
 $(BUILD)/tq_run: tq_run.c $(CORE_SRC) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+# Links zlib for the deflate baseline. That baseline is the whole point of the
+# tool — a compression number with nothing to compare it against is a press
+# release, not a measurement.
+$(BUILD)/tq_sem: tq_sem.c $(CORE_SRC) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -lz
 
 $(BUILD)/test_all: tests/test_all.c tests/golden.h $(CORE_SRC) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tests/test_all.c $(CORE_SRC) $(LDLIBS)

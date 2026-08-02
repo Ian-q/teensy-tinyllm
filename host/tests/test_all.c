@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include "tq/tq.h"
+#include "tq/tq_ac.h"
 #include "golden.h"
 
 static int g_fail;
@@ -482,6 +483,295 @@ static void test_sampler(int vocab)
 	free(prob);
 }
 
+/* ------------------------------------------------------- arithmetic coding */
+
+static uint64_t ac_rng = 0x9E3779B97F4A7C15ull;
+
+static uint32_t ac_rand(void)
+{
+	ac_rng ^= ac_rng >> 12;
+	ac_rng ^= ac_rng << 25;
+	ac_rng ^= ac_rng >> 27;
+	return (uint32_t)((ac_rng * 0x2545F4914F6CDD1Dull) >> 32);
+}
+
+/*
+ * Drive the raw coder with an explicit count table, no model involved. This is
+ * where carry-propagation bugs surface as something diagnosable: a round trip
+ * that fails here is arithmetic, while one that only fails on real logits is a
+ * probability-table disagreement.
+ */
+static void ac_roundtrip(const char *label, const uint32_t *cnt, int n, int nsym)
+{
+	uint8_t  *out = malloc(4u * (size_t)nsym + 64u);
+	int      *sym = malloc(sizeof(int) * (size_t)nsym);
+	TqAcEnc   e;
+	TqAcDec   d;
+	uint32_t  tot = 0, cum;
+	size_t    len;
+	int       i, k, bad = -1;
+
+	for (i = 0; i < n; i++) {
+		tot += cnt[i];
+	}
+
+	/* Sample from the table itself, so the stream really is typical of the
+	 * distribution being coded against and the length check below means
+	 * something. */
+	for (i = 0; i < nsym; i++) {
+		uint32_t t = ac_rand() % tot;
+		uint32_t c = 0;
+
+		for (k = 0; k < n; k++) {
+			if (t < c + cnt[k]) {
+				break;
+			}
+			c += cnt[k];
+		}
+		sym[i] = k;
+	}
+
+	tq_ac_enc_init(&e, out, 4u * (size_t)nsym + 64u);
+	for (i = 0; i < nsym; i++) {
+		cum = 0;
+		for (k = 0; k < sym[i]; k++) {
+			cum += cnt[k];
+		}
+		tq_ac_enc_sym(&e, cum, cnt[sym[i]], tot);
+	}
+	len = tq_ac_enc_finish(&e);
+	CHECK(!e.overflow, "%s: encoder overflowed", label);
+	CHECK(len == tq_ac_enc_finish(&e), "%s: finish() not idempotent", label);
+
+	tq_ac_dec_init(&d, out, len);
+	for (i = 0; i < nsym; i++) {
+		uint32_t t = tq_ac_dec_target(&d, tot);
+		uint32_t c = 0;
+
+		for (k = 0; k < n; k++) {
+			if (t < c + cnt[k]) {
+				break;
+			}
+			c += cnt[k];
+		}
+		tq_ac_dec_update(&d, c, cnt[k]);
+		if (k != sym[i] && bad < 0) {
+			bad = i;
+		}
+	}
+	CHECK(bad < 0, "%s: first mismatch at symbol %d", label, bad);
+
+	/* Within 1% of entropy plus the 5-byte flush. A coder that round-trips but
+	 * codes to the wrong length is using a different distribution than it
+	 * thinks. */
+	{
+		double bits = 0.0;
+
+		for (i = 0; i < nsym; i++) {
+			bits -= log2((double)cnt[sym[i]] / (double)tot);
+		}
+		CHECK((double)len * 8.0 < bits * 1.01 + 48.0,
+		      "%s: %zu bytes vs %.1f bits of entropy", label, len, bits);
+		printf("  %-18s %5zu bytes for %.0f bits of entropy\n",
+		       label, len, bits);
+	}
+
+	free(out);
+	free(sym);
+}
+
+static void test_arith(TqModel *m)
+{
+	uint32_t cnt[64];
+	int      i;
+
+	printf("arithmetic coder: fixed-point exp2\n");
+
+	CHECK(tq_ac_exp2_q24(0) == (1u << 24), "exp2(0) = %u", tq_ac_exp2_q24(0));
+	CHECK(tq_ac_exp2_q24(-(1 << 16)) == (1u << 23), "exp2(-1) wrong");
+	CHECK(tq_ac_exp2_q24(-(4 << 16)) == (1u << 20), "exp2(-4) wrong");
+	CHECK(tq_ac_exp2_q24(-(64 << 16)) == 0u, "exp2(-64) should underflow to 0");
+	/*
+	 * Two different properties, measured where each one means something.
+	 *
+	 * Relative accuracy belongs to the polynomial, so it is checked over the
+	 * polynomial's own domain [-1, 0] where the result has not been shifted.
+	 * Further down, the Q24 LSB *is* the value — at 2^-24 the answer is a
+	 * single count — so no implementation could hold a relative bound there,
+	 * and absolute error is the honest measure. Both bounds are far finer
+	 * than the 16-bit counts downstream can express, which is what actually
+	 * matters.
+	 */
+	{
+		double worst_rel = 0.0, worst_abs = 0.0;
+
+		for (i = 0; i >= -(1 << 16); i -= 7) {
+			double want = pow(2.0, (double)i / 65536.0) * (double)(1u << 24);
+			double rel  = fabs((double)tq_ac_exp2_q24(i) - want) / want;
+
+			if (rel > worst_rel) {
+				worst_rel = rel;
+			}
+		}
+		for (i = 0; i > -24 * 65536; i -= 997) {
+			double want = pow(2.0, (double)i / 65536.0) * (double)(1u << 24);
+			double err  = fabs((double)tq_ac_exp2_q24(i) - want);
+
+			if (err > worst_abs) {
+				worst_abs = err;
+			}
+		}
+		CHECK(worst_rel < 1e-6, "exp2 worst relative error %.3g", worst_rel);
+		CHECK(worst_abs < 8.0, "exp2 worst absolute error %.3g LSB", worst_abs);
+		printf("  worst error vs pow(): %.2e relative, %.2f LSB absolute\n",
+		       worst_rel, worst_abs);
+	}
+	{
+		/* Monotonicity across a whole octave. A polynomial that dips would
+		 * make a more probable symbol cheaper to code than a less probable
+		 * one — self-consistent, so the round trip would still pass, and the
+		 * compression would silently be worse than the model warrants. */
+		uint32_t prev = tq_ac_exp2_q24(-(1 << 16));
+		int      mono = 1;
+
+		for (i = -(1 << 16) + 1; i <= 0; i++) {
+			uint32_t v = tq_ac_exp2_q24(i);
+
+			if (v < prev) {
+				mono = 0;
+			}
+			prev = v;
+		}
+		CHECK(mono, "exp2 is not monotone over [-1, 0]");
+	}
+
+	printf("arithmetic coder: round trip against explicit tables\n");
+
+	/* Near-uniform: the coder's worst case for output size. */
+	for (i = 0; i < 16; i++) {
+		cnt[i] = TQ_AC_TOT / 16u;
+	}
+	ac_roundtrip("uniform/16", cnt, 16, 4000);
+
+	/*
+	 * One symbol at 65520/65536. Long runs of a near-certain symbol are what
+	 * drive `low` into extended 0xFF territory, which is the only path that
+	 * exercises deferred carry propagation.
+	 */
+	cnt[0] = TQ_AC_TOT - 15u;
+	for (i = 1; i < 16; i++) {
+		cnt[i] = 1u;
+	}
+	ac_roundtrip("skewed/16", cnt, 16, 20000);
+
+	/*
+	 * Ragged counts with no power-of-two structure anywhere. The 900 bound is
+	 * load-bearing: 63 symbols cannot then exceed TQ_AC_TOT, and a total above
+	 * 2^16 silently breaks the coder's precision rather than failing loudly.
+	 */
+	{
+		uint32_t used = 0;
+
+		for (i = 0; i < 63; i++) {
+			cnt[i] = 1u + (ac_rand() % 900u);
+			used += cnt[i];
+		}
+		CHECK(used < TQ_AC_TOT, "ragged fixture overran the total: %u", used);
+		cnt[63] = TQ_AC_TOT - used;
+		ac_roundtrip("ragged/64", cnt, 64, 4000);
+	}
+
+	/* --------------------------------------------- against real logits --- */
+
+	printf("arithmetic coder: round trip against model logits\n");
+	{
+		TqRuntime rt;
+		TqAcModel pm;
+		TqAcEnc   e;
+		TqAcDec   d;
+		size_t    fb = tq_runtime_bytes(m, GOLDEN_STEPS);
+		size_t    cb = tq_kv_bytes(m, GOLDEN_STEPS, TQ_KV_F32);
+		void     *fast = malloc(fb);
+		void     *cache = malloc(cb);
+		uint8_t   out[256];
+		float    *saved = malloc(sizeof(float) * (size_t)m->vocab_size *
+					 GOLDEN_STEPS);
+		size_t    len;
+		int       rc, step, bad = -1;
+		double    bits = 0.0;
+
+		rc = tq_runtime_init(&rt, m, GOLDEN_STEPS, TQ_KV_F32, fast, fb,
+				     cache, cb);
+		CHECK(rc == TQ_OK, "ac runtime: %s", tq_strerror(rc));
+		CHECK(tq_ac_model_init(&pm, m->vocab_size) == TQ_OK, "ac model init");
+
+		/*
+		 * Encode golden_tokens[step+1] under the distribution the model
+		 * predicts after golden_tokens[step] — exactly the causal ordering a
+		 * real message uses. The logits are stashed because the decoder must
+		 * see bit-identical values, which on one machine it does by
+		 * construction; the cross-architecture case is what P1 is for.
+		 */
+		for (step = 0; rc == TQ_OK && step < GOLDEN_STEPS; step++) {
+			rc = tq_forward(&rt, golden_tokens[step], step);
+			CHECK(rc == TQ_OK, "ac forward %d: %s", step, tq_strerror(rc));
+			memcpy(saved + (size_t)step * m->vocab_size, rt.logits,
+			       sizeof(float) * (size_t)m->vocab_size);
+		}
+
+		tq_ac_enc_init(&e, out, sizeof(out));
+		for (step = 0; step + 1 < GOLDEN_STEPS; step++) {
+			const float *lg = saved + (size_t)step * m->vocab_size;
+			int          tk = golden_tokens[step + 1];
+
+			CHECK(tq_ac_enc_token(&e, &pm, lg, tk) == TQ_OK,
+			      "encode token %d", tk);
+			/* Both levels, since the pair is what actually goes on
+			 * the wire and their product is P(token). */
+			bits += -log2((double)pm.bcnt[tk / TQ_AC_BUCKET] /
+				      (double)TQ_AC_TOT)
+				- log2((double)pm.scnt[tk % TQ_AC_BUCKET] /
+				       (double)TQ_AC_TOT);
+		}
+		len = tq_ac_enc_finish(&e);
+		CHECK(!e.overflow, "model encode overflowed");
+		CHECK((double)len * 8.0 < bits * 1.01 + 48.0,
+		      "%zu bytes vs %.1f bits the table charges", len, bits);
+
+		tq_ac_dec_init(&d, out, len);
+		for (step = 0; step + 1 < GOLDEN_STEPS; step++) {
+			const float *lg = saved + (size_t)step * m->vocab_size;
+			int          got = tq_ac_dec_token(&d, &pm, lg);
+
+			if (got != golden_tokens[step + 1] && bad < 0) {
+				bad = step;
+			}
+		}
+		CHECK(bad < 0, "model round trip diverged at step %d", bad);
+		printf("  %d tokens coded in %zu bytes\n", GOLDEN_STEPS - 1, len);
+
+		/* Counts must always tile the range exactly and leave nothing
+		 * unencodable, or some token becomes impossible to transmit. */
+		{
+			uint32_t sum = 0;
+			int      lo = 1;
+
+			for (i = 0; i < pm.nbuckets; i++) {
+				sum += pm.bcnt[i];
+				if (pm.bcnt[i] < 1u) {
+					lo = 0;
+				}
+			}
+			CHECK(sum == TQ_AC_TOT, "bucket counts sum to %u", sum);
+			CHECK(lo, "a bucket had a zero count");
+		}
+
+		free(fast);
+		free(cache);
+		free(saved);
+	}
+}
+
 /* -------------------------------------------------------------- rejection */
 
 static void test_rejects_garbage(void)
@@ -611,6 +901,7 @@ int main(int argc, char **argv)
 
 	test_tokenizer(&m);
 	test_sampler(m.vocab_size);
+	test_arith(&m);
 	test_streaming();
 	test_rejects_garbage();
 
