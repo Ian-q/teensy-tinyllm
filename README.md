@@ -42,6 +42,8 @@ memory. Those two have not been run.
 
 - **[docs/HARDWARE.md](docs/HARDWARE.md)** — what to buy, and which of the
   three possible memory configurations to build.
+- **[docs/INVENTORY.md](docs/INVENTORY.md)** — the hardware actually on hand,
+  and what is verified about each piece.
 - **[docs/SOLDERING.md](docs/SOLDERING.md)** — the actual fiddly bit.
 - **[docs/BRINGUP.md](docs/BRINGUP.md)** — first power-on to first token.
 - **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)** — why this is memory-bound by
