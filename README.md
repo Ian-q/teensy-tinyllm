@@ -9,19 +9,22 @@ PSRAM. A fully-populated Teensy 4.1 has **16× the memory**, **2.5× the clock**
 a hardware FPU, DSP MAC instructions, and a 4-bit SDIO card slot. This project
 finds out what that actually buys you.
 
-Short answer: a **42-million-parameter** model resident in RAM at ~1.5–2.3
-tok/s, a **15M** model at ~4–6 tok/s, and — by streaming weights off the SD
-card instead of holding them — a **110M** model at ~0.5 tok/s, which is
-about 4× larger than the board's entire physical memory.
+Measured answer, on a board with 16 MB soldered on: a **15-million-parameter**
+model generates coherent TinyStories prose at **2.98 tok/s**, 309 ms to first
+token, reading 8.3 MB of weights per token at 25.5 MB/s effective — 81% of what
+the raw sequential bench does. Larger configurations are *predicted* at ~1.5–2.3
+tok/s for a 42M model resident in RAM and ~0.5 tok/s for a 110M model streamed
+off the SD card, which would be about 4× larger than the board's entire physical
+memory. Those two have not been run.
 
-> **Status: everything except the soldering is done.** The inference engine is
-> written, tested, and verified against a NumPy oracle; the Cortex-M7 DSP
-> kernels have been executed under emulation and produce bit-identical results;
-> the FlexSPI2 PSRAM driver is written against the RT1062 reference manual with
-> its command encodings machine-checked against PJRC's reference
-> implementation. What has **not** happened is anyone soldering chips to a
-> board and running it. See [docs/STATUS.md](docs/STATUS.md) for exactly what
-> is proven and what is not.
+> **Status: it runs.** As of 2026-07-31 the whole path works on hardware —
+> `stories15M.etq` loads from SD into hand-soldered PSRAM and generates on the
+> Teensy. Before that, the engine was written and verified without any board
+> in existence: 602 host assertions, the forward pass within 7.9e-06 of a NumPy
+> oracle, and the Cortex-M7 DSP kernels executed under emulation. Bring-up
+> still found five real defects that emulation could not reach. See
+> [docs/STATUS.md](docs/STATUS.md) for exactly what is proven and what is not —
+> it is the authoritative record, and this README is a summary of it.
 
 ---
 
@@ -29,7 +32,7 @@ about 4× larger than the board's entire physical memory.
 
 | Path | What it is |
 |---|---|
-| `core/` | `libtq` — the inference engine. Portable C99, no malloc, no libc beyond `memcpy` and `libm`. 7.9 KB of Cortex-M7 code, zero static RAM. |
+| `core/` | `libtq` — the inference engine. Portable C99, no malloc, no libc beyond `memcpy` and `sqrtf`. 10.5 KB of Cortex-M7 code, zero static RAM. |
 | `firmware/teensy41-tinyllm/` | Zephyr application: FlexSPI2 PSRAM driver, SD model loader, shell. |
 | `host/` | The same engine built natively, plus the test suite. |
 | `tools/etq/` | Model converter and quantizers (`llama2.c` and HuggingFace inputs). |
@@ -85,6 +88,27 @@ python3 tools/chat.py serial /dev/cu.usbmodem12345    # needs: pip install pyser
 ```
 
 Type to generate; `/help` lists the knobs (`/n`, `/t`, `/p`, `/s`, `/load`).
+
+## Semaphore: the model as a radio codec
+
+Two devices holding the identical `.etq` don't need to exchange text — only the
+part the model failed to predict. That turns a 70-character message into
+**5 bytes**, where gzip manages 65, because a payload that short gives a
+classical coder no repetition to work with and a language model arrives already
+holding the dictionary.
+
+```bash
+tinyllm> tinyllm sem encode Once upon a time there was a little girl named Lily
+wire  : 11536c21ff
+bytes : 5 from 70 chars (0.57 bits/char, 17 tokens)
+```
+
+It is genuinely bidirectional: the board and the host produce byte-identical
+wire bytes for the same string, which requires their logits to agree *exactly*
+— see `core/include/tq/tq_math.h` for why that is harder than it sounds.
+[`docs/semaphore-demo.html`](docs/semaphore-demo.html) walks through where the
+bits go, token by token, and is generated from live measurements by
+`tools/make_demo.py`.
 
 ## Converting a real model
 
