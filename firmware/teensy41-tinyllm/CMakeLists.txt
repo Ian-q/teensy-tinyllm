@@ -9,7 +9,12 @@ project(teensy41_tinyllm)
 # The inference core is plain C99 shared verbatim with the host build. It is
 # compiled straight into the app rather than vendored or wrapped, so there is
 # exactly one copy of the numerics and the host tests cover the device.
-file(GLOB TQ_CORE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../core/src/*.c)
+#
+# CONFIGURE_DEPENDS is not decoration: without it CMake expands the glob once
+# and caches it, so a newly added core file links fine on the host and fails
+# with undefined references here until someone thinks to build pristine.
+file(GLOB TQ_CORE_SRC CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/../../core/src/*.c)
 
 target_sources(app PRIVATE
     src/main.c
@@ -30,4 +35,11 @@ target_include_directories(app PRIVATE
 # Warnings-as-errors on our own code only. Scoped to `app` rather than set
 # globally so Zephyr's own subsystems (which emit deliberate #warnings, e.g.
 # CDC-ACM forcing log levels) do not make the build brittle across SDK bumps.
-target_compile_options(app PRIVATE -Werror)
+#
+# -ffp-contract=off must match host/Makefile exactly. GCC defaults to `fast`,
+# which fuses a*b+c into an FMA that rounds once where the unfused pair rounds
+# twice. This board is the one target where that matters most: it is the far
+# end of a Semaphore decode whose other end is a laptop, and the arithmetic
+# decoder desynchronises on a single differing bit. `tinyllm sem hash` must
+# print what `tq_sem MODEL.etq hash` prints, and this flag is why it can.
+target_compile_options(app PRIVATE -Werror -ffp-contract=off)

@@ -33,8 +33,16 @@
 #include "model_store.h"
 #include "psram_flexspi2.h"
 #include "tq/tq.h"
+#include "tq/tq_ac.h"
 
 LOG_MODULE_REGISTER(tinyllm, CONFIG_TINYLLM_LOG_LEVEL);
+
+/* Semaphore wire limits. The 8-bit length field caps a message at 255 tokens;
+ * the wire buffer is sized for the pathological case where the model finds the
+ * text totally unpredictable and every token costs its full ~16 bits. */
+#define SEM_MAX_TOKENS  256
+#define SEM_MAX_WIRE    640
+#define SEM_HASH_STEPS  8
 
 /* ------------------------------------------------------------------ state */
 
@@ -476,6 +484,250 @@ static int cmd_info(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* -------------------------------------------------------------- semaphore */
+
+/*
+ * Compress a message against the model's own predictions and put the residual
+ * surprise on the wire. See core/include/tq/tq_ac.h and issue #15.
+ *
+ * The count tables are ~6.7 KB and belong in OCRAM2 with the other hot state
+ * rather than on the shell thread's stack. `sem_toks` likewise: a 255-token
+ * message is a kilobyte, and the shell thread has other work to do.
+ */
+static TqAcModel sem_pm Z_GENERIC_SECTION(OCRAM2) __aligned(8);
+static int32_t   sem_toks[SEM_MAX_TOKENS] Z_GENERIC_SECTION(OCRAM2) __aligned(4);
+static uint8_t   sem_wire[SEM_MAX_WIRE];
+
+/* Wire format matches host/tq_sem.c exactly: a flat 8-bit token count, then
+ * every token after the BOS. An in-band EOS was measured at 25.4 bits — 29% of
+ * a short message — because the model has no reason to expect one. */
+#define SEM_LEN_FREQ (TQ_AC_TOT / 256u)
+
+static int sem_ready(const struct shell *sh)
+{
+	if (!g_loaded) {
+		shell_error(sh, "no model loaded — `tinyllm load <file.etq>`");
+		return -ENODEV;
+	}
+	if (!g_have_tok) {
+		shell_error(sh, "this model has no tokenizer");
+		return -ENOTSUP;
+	}
+	if (tq_ac_model_init(&sem_pm, g_model.vocab_size) != TQ_OK) {
+		shell_error(sh, "vocab %d out of range for the coder",
+			    g_model.vocab_size);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static int cmd_sem_encode(const struct shell *sh, size_t argc, char **argv)
+{
+	char     text[192];
+	TqAcEnc  e;
+	size_t   used = 0, len, i;
+	int      n, rc, pos;
+	int64_t  t0;
+
+	rc = sem_ready(sh);
+	if (rc) {
+		return rc;
+	}
+
+	text[0] = '\0';
+	for (i = 1; i < argc; i++) {
+		size_t l = strlen(argv[i]);
+
+		if (used + l + 2 < sizeof(text)) {
+			if (used) {
+				text[used++] = ' ';
+			}
+			memcpy(text + used, argv[i], l);
+			used += l;
+			text[used] = '\0';
+		}
+	}
+
+	n = tq_encode(&g_tok, text, 1, 0, sem_toks, SEM_MAX_TOKENS);
+	if (n < 0) {
+		shell_error(sh, "encode: %s", tq_strerror(n));
+		return -EINVAL;
+	}
+	if (n - 1 > 255 || n > g_rt.max_seq) {
+		shell_error(sh, "message too long: %d tokens", n - 1);
+		return -EMSGSIZE;
+	}
+
+	t0 = k_uptime_get();
+	tq_ac_enc_init(&e, sem_wire, sizeof(sem_wire));
+	tq_ac_enc_sym(&e, (uint32_t)(n - 1) * SEM_LEN_FREQ, SEM_LEN_FREQ,
+		      TQ_AC_TOT);
+
+	for (pos = 0; pos + 1 < n; pos++) {
+		rc = tq_forward(&g_rt, (int)sem_toks[pos], pos);
+		if (rc != TQ_OK) {
+			shell_error(sh, "forward %d: %s", pos, tq_strerror(rc));
+			return -EIO;
+		}
+		rc = tq_ac_enc_token(&e, &sem_pm, g_rt.logits, (int)sem_toks[pos + 1]);
+		if (rc != TQ_OK) {
+			shell_error(sh, "code %d: %s", pos, tq_strerror(rc));
+			return -EIO;
+		}
+	}
+	len = tq_ac_enc_finish(&e);
+	t0 = k_uptime_get() - t0;
+
+	if (e.overflow) {
+		shell_error(sh, "wire buffer overflowed");
+		return -ENOBUFS;
+	}
+
+	shell_fprintf(sh, SHELL_NORMAL, "wire  : ");
+	for (i = 0; i < len; i++) {
+		shell_fprintf(sh, SHELL_NORMAL, "%02x", sem_wire[i]);
+	}
+	shell_fprintf(sh, SHELL_NORMAL, "\n");
+	shell_print(sh, "bytes : %u from %u chars (%u.%02u bits/char, %u tokens)",
+		    (unsigned)len, (unsigned)used,
+		    (unsigned)(len * 8u / (used ? used : 1u)),
+		    (unsigned)((len * 800u / (used ? used : 1u)) % 100u),
+		    (unsigned)(n - 1));
+	shell_print(sh, "time  : %u ms (%d forward passes)",
+		    (unsigned)t0, n - 1);
+	return 0;
+}
+
+static int cmd_sem_decode(const struct shell *sh, size_t argc, char **argv)
+{
+	TqAcDec  d;
+	char     piece[64];
+	size_t   len = 0;
+	const char *hex = argv[1];
+	uint32_t target;
+	int      rc, want, n, prev;
+	int64_t  t0;
+
+	ARG_UNUSED(argc);
+
+	rc = sem_ready(sh);
+	if (rc) {
+		return rc;
+	}
+
+	len = hex2bin(hex, strlen(hex), sem_wire, sizeof(sem_wire));
+	if (len == 0) {
+		shell_error(sh, "expected hex wire bytes");
+		return -EINVAL;
+	}
+
+	t0 = k_uptime_get();
+	tq_ac_dec_init(&d, sem_wire, len);
+	target = tq_ac_dec_target(&d, TQ_AC_TOT);
+	want   = (int)(target / SEM_LEN_FREQ);
+	tq_ac_dec_update(&d, (uint32_t)want * SEM_LEN_FREQ, SEM_LEN_FREQ);
+
+	if (want + 1 > SEM_MAX_TOKENS || want + 1 > g_rt.max_seq) {
+		shell_error(sh, "decoded length %d is implausible — corrupt wire?",
+			    want);
+		return -EMSGSIZE;
+	}
+
+	sem_toks[0] = (int32_t)g_model.hdr.bos_token;
+	for (n = 1; n < want + 1; n++) {
+		int next;
+
+		rc = tq_forward(&g_rt, (int)sem_toks[n - 1], n - 1);
+		if (rc != TQ_OK) {
+			shell_error(sh, "forward %d: %s", n - 1, tq_strerror(rc));
+			return -EIO;
+		}
+		next = tq_ac_dec_token(&d, &sem_pm, g_rt.logits);
+		if (next < 0) {
+			shell_error(sh, "decode %d: %s", n, tq_strerror(next));
+			return -EIO;
+		}
+		sem_toks[n] = (int32_t)next;
+	}
+	t0 = k_uptime_get() - t0;
+
+	shell_fprintf(sh, SHELL_NORMAL, "text  : ");
+	prev = (int)sem_toks[0];
+	for (n = 1; n < want + 1; n++) {
+		if (tq_decode(&g_tok, prev, (int)sem_toks[n], piece,
+			      sizeof(piece)) >= 0) {
+			shell_fprintf(sh, SHELL_NORMAL, "%s", piece);
+		}
+		prev = (int)sem_toks[n];
+	}
+	shell_fprintf(sh, SHELL_NORMAL, "\n");
+	shell_print(sh, "time  : %u ms (%d forward passes)", (unsigned)t0, want);
+	return 0;
+}
+
+/*
+ * FNV-1a over the raw bytes of the logits, for a fixed token sequence derived
+ * from the vocabulary size so it needs no tokenizer and works on any model.
+ *
+ * This is the load-bearing check for Semaphore: `tq_sem MODEL.etq hash` on the
+ * host must print the identical value. If it does, this board and that laptop
+ * compute byte-identical probability tables and can be the two ends of one
+ * arithmetic-coded message. If it does not, no amount of protocol work will
+ * make them interoperate. See core/include/tq/tq_math.h.
+ */
+static int cmd_sem_hash(const struct shell *sh, size_t argc, char **argv)
+{
+	uint64_t h = 1469598103934665603ull;
+	int      step, i, k, rc;
+	int64_t  t0;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!g_loaded) {
+		shell_error(sh, "no model loaded");
+		return -ENODEV;
+	}
+
+	t0 = k_uptime_get();
+	for (step = 0; step < SEM_HASH_STEPS; step++) {
+		int tok = (step * 4099 + 17) % g_model.vocab_size;
+
+		rc = tq_forward(&g_rt, tok, step);
+		if (rc != TQ_OK) {
+			shell_error(sh, "forward %d: %s", step, tq_strerror(rc));
+			return -EIO;
+		}
+		for (i = 0; i < g_model.vocab_size; i++) {
+			uint8_t b[sizeof(float)];
+
+			memcpy(b, &g_rt.logits[i], sizeof(b));
+			for (k = 0; k < (int)sizeof(b); k++) {
+				h ^= (uint64_t)b[k];
+				h *= 1099511628211ull;
+			}
+		}
+	}
+	t0 = k_uptime_get() - t0;
+
+	shell_print(sh, "logit bit hash: %08x%08x  [%s]",
+		    (unsigned)(h >> 32), (unsigned)(h & 0xFFFFFFFFu),
+		    tq_kernel_backend());
+	shell_print(sh, "  %d steps in %u ms — compare with "
+			"`tq_sem MODEL.etq hash`", SEM_HASH_STEPS, (unsigned)t0);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sem_cmds,
+	SHELL_CMD_ARG(encode, NULL, "encode <text...> — compress to wire bytes",
+		      cmd_sem_encode, 2, 24),
+	SHELL_CMD_ARG(decode, NULL, "decode <hex> — recover the message",
+		      cmd_sem_decode, 2, 0),
+	SHELL_CMD_ARG(hash,   NULL, "hash — logit fingerprint, must match the host",
+		      cmd_sem_hash, 1, 0),
+	SHELL_SUBCMD_SET_END
+);
+
 SHELL_STATIC_SUBCMD_SET_CREATE(tinyllm_cmds,
 	SHELL_CMD_ARG(psram,  NULL,
 		      "psram [info|sweep|test|bench]", cmd_psram, 1, 1),
@@ -489,6 +741,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(tinyllm_cmds,
 		      "gen [-n N] [-t T] [-p P] [-s SEED] <prompt...>",
 		      cmd_gen, 1, 24),
 	SHELL_CMD_ARG(info,   NULL, "show configuration", cmd_info, 1, 0),
+	SHELL_CMD(sem, &sem_cmds,
+		  "compress a message against the model itself", NULL),
 	SHELL_SUBCMD_SET_END
 );
 SHELL_CMD_REGISTER(tinyllm, &tinyllm_cmds, "Tiny LLM on Teensy 4.1", NULL);

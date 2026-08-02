@@ -481,6 +481,46 @@ static int do_decode(const char *hex)
 	return 0;
 }
 
+/*
+ * The counterpart to `tinyllm sem hash` on the board. Same fixed token
+ * sequence, derived from the vocabulary size so it needs no tokenizer, and the
+ * same FNV-1a over the raw logit bytes.
+ *
+ * If these two values agree, the laptop and the Teensy compute byte-identical
+ * probability tables and can be the two ends of one arithmetic-coded message.
+ * If they disagree, no amount of protocol work will make them interoperate —
+ * see core/include/tq/tq_math.h.
+ */
+#define SEM_HASH_STEPS 8
+
+static int do_hash(void)
+{
+	uint64_t h = 1469598103934665603ull;
+	int      step, i, k, rc;
+
+	for (step = 0; step < SEM_HASH_STEPS; step++) {
+		int tok = (step * 4099 + 17) % g_model.vocab_size;
+
+		rc = tq_forward(&g_rt, tok, step);
+		if (rc != TQ_OK) {
+			fprintf(stderr, "forward: %s\n", tq_strerror(rc));
+			return 1;
+		}
+		for (i = 0; i < g_model.vocab_size; i++) {
+			unsigned char b[sizeof(float)];
+
+			memcpy(b, &g_rt.logits[i], sizeof(b));
+			for (k = 0; k < (int)sizeof(b); k++) {
+				h ^= (uint64_t)b[k];
+				h *= 1099511628211ull;
+			}
+		}
+	}
+	printf("logit bit hash: %016llx  [%s]\n", (unsigned long long)h,
+	       tq_kernel_backend());
+	return 0;
+}
+
 static void usage(void)
 {
 	fprintf(stderr,
@@ -488,6 +528,7 @@ static void usage(void)
 		"  encode TEXT     compress one message, show the wire bytes\n"
 		"  decode HEX      decompress wire bytes back to text\n"
 		"  bench FILE      one message per line, totals at the end\n"
+		"  hash            logit fingerprint; must equal `tinyllm sem hash`\n"
 		"\noptions:\n"
 		"  --dict FILE     prime the deflate baseline with a shared\n"
 		"                  dictionary. Must be held-out text, or the\n"
@@ -526,6 +567,9 @@ int main(int argc, char **argv)
 	}
 	if (!strcmp(argv[2], "bench") && argc > 3) {
 		return do_bench(argv[3]);
+	}
+	if (!strcmp(argv[2], "hash")) {
+		return do_hash();
 	}
 	usage();
 	return 2;
