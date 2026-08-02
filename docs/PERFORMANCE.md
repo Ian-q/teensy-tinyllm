@@ -92,6 +92,33 @@ Two cheaper variants of the same idea, neither implemented:
   then only the rows in that bucket. Turns an `O(vocab)` read into
   `O(√vocab)`, at the cost of exactness.
 
+## Semaphore: what compression costs on the board
+
+Coding a message against the model runs one forward pass per token, so it
+inherits the same bandwidth wall as generation — **~325 ms per token, measured**
+on `stories15M`. A 70-character message is ~17 tokens: about 5.5 s to encode and
+5.5 s to decode.
+
+The two directions are not equally improvable, and the asymmetry decides where
+effort goes:
+
+- **Encoding knows every token up front.** It is a pure prefill workload, so
+  batched prefill (which raises arithmetic intensity, see below) applies
+  directly and would cut it substantially.
+- **Decoding cannot batch at all.** Token *i* must be recovered before the
+  logits that decode token *i+1* exist. Decode time is therefore a hard floor
+  set by bytes-per-token, and the only levers on it are a smaller model or a
+  smaller vocabulary.
+
+That also inverts the usual advice about vocabulary size. For plain generation,
+smaller is strictly better. For Semaphore the cost is *passes x bytes-per-pass*,
+and going all the way to character level multiplies passes by ~4 while only
+cutting bytes ~2.5x — roughly 18 BPE passes at 8.5 MB (153 MB) against ~70
+character passes at 3.4 MB (238 MB). A moderate reduction still wins (a 4096
+vocab lands near 88 MB, ~1.7x better), so there is an optimum in the middle
+rather than a monotone preference. These are estimates from the parameter split,
+not measurements.
+
 ## Time to first token
 
 Prompt processing runs the same code path per token, so a 20-token prompt
