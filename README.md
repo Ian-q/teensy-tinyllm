@@ -106,9 +106,10 @@ bytes : 5 from 70 chars (0.57 bits/char, 17 tokens)
 It is genuinely bidirectional: the board and the host produce byte-identical
 wire bytes for the same string, which requires their logits to agree *exactly*
 — see `core/include/tq/tq_math.h` for why that is harder than it sounds.
-[`docs/semaphore-demo.html`](docs/semaphore-demo.html) walks through where the
-bits go, token by token, and is generated from live measurements by
-`tools/make_demo.py`.
+**[The walkthrough](https://ian-q.github.io/teensy-tinyllm/)** shows where the bits
+go, token by token. It is generated from live measurements by
+`tools/make_demo.py`, not written by hand, so regenerating it after a fine-tune
+produces honest new numbers rather than a stale page with a new date.
 
 ## Converting a real model
 

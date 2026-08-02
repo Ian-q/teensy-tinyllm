@@ -7,3 +7,7 @@ __pycache__/
 *.pyc
 .venv/
 .west/
+
+# Plugin working state, not project content. The research notes worth
+# keeping were moved to docs/research/.
+.superpowers/

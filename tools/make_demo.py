@@ -59,15 +59,50 @@ def main() -> int:
     ap.add_argument("--model", required=True)
     ap.add_argument("--tq-sem", default="host/build/tq_sem")
     ap.add_argument("--dict", dest="dictfile", default="tools/corpora/dict.txt")
-    ap.add_argument("--out", default="docs/semaphore-demo.html")
+    ap.add_argument("--out", default="docs/index.html")
+    ap.add_argument("--fragment", action="store_true",
+                    help="emit only the page content, for hosts that supply "
+                         "their own <head> and CSS reset (e.g. Claude Artifacts)")
     args = ap.parse_args()
 
     data = measure(args.tq_sem, args.model, args.dictfile)
-    page = HEAD + BODY.replace("__DATA__", json.dumps(data, separators=(",", ":")))
+    body = BODY.replace("__DATA__", json.dumps(data, separators=(",", ":")))
+    if args.fragment:
+        # The Artifact runtime wraps the fragment in its own document, so the
+        # <title> and <style> that belong in a <head> are simply emitted first.
+        page = HEAD + body
+    else:
+        page = SHELL.replace("__HEAD__", HEAD.rstrip()).replace("__BODY__", body)
     pathlib.Path(args.out).write_text(page)
     print(f"{args.out}: {len(page)} bytes, {len(data)} messages, "
           f"{sum(len(m['tokens']) for m in data)} tokens")
     return 0
+
+SHELL = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Two devices holding the same language model can exchange only what the model failed to predict. A 70-character message becomes 5 bytes, measured on a Teensy 4.1.">
+<meta property="og:title" content="Semaphore \u2014 sending text as the model\u2019s surprise">
+<meta property="og:description" content="A 15M-parameter language model as the probability source for an arithmetic coder, running on a microcontroller. 70 characters to 5 bytes.">
+<meta property="og:type" content="article">
+<style>
+/* Minimal reset. The Artifact runtime supplies one; a standalone page must not
+   assume it. */
+*,*::before,*::after{box-sizing:border-box;}
+body{margin:0;}
+img,svg{max-width:100%;height:auto;}
+button{font:inherit;color:inherit;}
+:focus-visible{outline:2px solid var(--signal);outline-offset:2px;}
+</style>
+__HEAD__
+</head>
+<body>
+__BODY__
+</body>
+</html>
+"""
 
 HEAD = """<title>Semaphore — sending text as the model's surprise</title>
 <style>

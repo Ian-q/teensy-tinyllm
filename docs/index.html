@@ -1,3 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Two devices holding the same language model can exchange only what the model failed to predict. A 70-character message becomes 5 bytes, measured on a Teensy 4.1.">
+<meta property="og:title" content="Semaphore — sending text as the model’s surprise">
+<meta property="og:description" content="A 15M-parameter language model as the probability source for an arithmetic coder, running on a microcontroller. 70 characters to 5 bytes.">
+<meta property="og:type" content="article">
+<style>
+/* Minimal reset. The Artifact runtime supplies one; a standalone page must not
+   assume it. */
+*,*::before,*::after{box-sizing:border-box;}
+body{margin:0;}
+img,svg{max-width:100%;height:auto;}
+button{font:inherit;color:inherit;}
+:focus-visible{outline:2px solid var(--signal);outline-offset:2px;}
+</style>
 <title>Semaphore — sending text as the model's surprise</title>
 <style>
 :root{
@@ -148,6 +166,8 @@ footer p{color:var(--muted);font-size:.8rem;}
 code{font-family:var(--mono);font-size:.88em;background:var(--grid);
      padding:.1em .32em;border-radius:2px;}
 </style>
+</head>
+<body>
 
 <div class="wrap">
 
@@ -414,3 +434,6 @@ document.getElementById('bars').innerHTML = BARS.map(b => `
     </div>
   </div>`).join('');
 </script>
+
+</body>
+</html>
