@@ -13,6 +13,8 @@
 
 #include <math.h>
 
+#include "tq/tq_math.h"
+
 #include "tq/tq.h"
 
 /* xorshift64*, from Vigna. Cheap, well-distributed, and reproducible across
@@ -130,7 +132,7 @@ int tq_sample(TqSampler *s, float *logits)
 		}
 		max = logits[tq_argmax(logits, n)];
 		for (i = 0; i < n; i++) {
-			logits[i] = expf(logits[i] - max);
+			logits[i] = tq_expf(logits[i] - max);
 			sum += logits[i];
 		}
 		sum = 1.0f / sum;

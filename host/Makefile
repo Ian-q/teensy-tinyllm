@@ -14,7 +14,15 @@ CORE_DIR  := ../core
 CORE_SRC  := $(wildcard $(CORE_DIR)/src/*.c)
 INC       := -I$(CORE_DIR)/include -I$(CORE_DIR)/src -Itests -Ibuild
 WARN      := -std=c99 -Wall -Wextra -Werror -Wno-unused-parameter
-CFLAGS    ?= -O2 -g $(WARN) $(INC)
+
+# -ffp-contract=off is load-bearing, not tidiness. GCC defaults to `fast`,
+# which fuses a*b+c into a single FMA wherever the target has one. FMA rounds
+# once where the unfused pair rounds twice, so the same source produces
+# different bits on ARM (which fuses) than on a target that does not — and the
+# Semaphore decoder in core/src/tq_ac.c cannot survive a single differing bit.
+# See core/include/tq/tq_math.h.
+FPFLAGS   := -ffp-contract=off
+CFLAGS    ?= -O2 -g $(WARN) $(FPFLAGS) $(INC)
 LDLIBS    := -lm
 
 PY        := PYTHONPATH=../tools python3
@@ -75,7 +83,7 @@ QEMU      ?= qemu-arm-static
 ARM_FLAGS := -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -static
 
 $(BUILD)/test_all.arm: tests/test_all.c tests/golden.h $(CORE_SRC) | $(BUILD)
-	$(ARM_CC) $(ARM_FLAGS) -O2 $(WARN) $(INC) -o $@ tests/test_all.c \
+	$(ARM_CC) $(ARM_FLAGS) -O2 $(WARN) $(FPFLAGS) $(INC) -o $@ tests/test_all.c \
 		$(CORE_SRC) $(LDLIBS)
 
 test-arm: $(BUILD)/test_all.arm fixtures
@@ -94,7 +102,7 @@ M7_FLAGS := -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard \
 
 size-m7: | $(BUILD)
 	@for f in $(CORE_SRC); do \
-		$(M7_CC) $(M7_FLAGS) -std=c99 -Wall -Wextra -Werror $(INC) \
+		$(M7_CC) $(M7_FLAGS) -std=c99 -Wall -Wextra -Werror $(FPFLAGS) $(INC) \
 			-c $$f -o $(BUILD)/$$(basename $$f .c).m7.o || exit 1; \
 	done
 	@echo "-- Cortex-M7 object sizes (-Os)"
@@ -105,3 +113,33 @@ size-m7: | $(BUILD)
 
 clean:
 	rm -rf $(BUILD)
+
+# ------------------------------------------------- cross-architecture bits
+#
+# The determinism claim in core/include/tq/tq_math.h is not testable on one
+# machine: it says two different targets agree bit for bit. This runs the
+# native build and the ARM build under QEMU and demands their logit hashes
+# match. A tolerance-based comparison would pass while hiding exactly the
+# last-bit divergence that desynchronises an arithmetic decoder.
+.PHONY: test-bitexact
+test-bitexact: $(BUILD)/test_all $(BUILD)/test_all.arm fixtures
+	@./$(BUILD)/test_all $(BUILD)/test_q4.etq | grep 'logit bit hash' > $(BUILD)/hash.native
+	@$(QEMU) ./$(BUILD)/test_all.arm $(BUILD)/test_q4.etq | grep 'logit bit hash' > $(BUILD)/hash.arm
+	@cat $(BUILD)/hash.native $(BUILD)/hash.arm
+	@if [ "$$(awk '{print $$4}' $(BUILD)/hash.native)" = \
+	      "$$(awk '{print $$4}' $(BUILD)/hash.arm)" ]; then \
+		echo "   BIT-EXACT across architectures"; \
+	else \
+		echo "   *** logits DIFFER between native and ARM ***"; exit 1; \
+	fi
+
+# Same cross-architecture check, reproducible on a macOS laptop that has no
+# ARM cross-compiler. Needs only Docker; the container is disposable.
+.PHONY: docker-test
+docker-test:
+	docker run --rm -v "$(CURDIR)/..":/work -w /work debian:bookworm bash -c '\
+		export DEBIAN_FRONTEND=noninteractive; \
+		apt-get update -qq >/dev/null && \
+		apt-get install -y -qq gcc gcc-arm-linux-gnueabihf \
+			binutils-arm-linux-gnueabihf qemu-user-static make >/dev/null && \
+		make -C host test-arm'

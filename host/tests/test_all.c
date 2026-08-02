@@ -23,6 +23,7 @@
 
 #include "tq/tq.h"
 #include "tq/tq_ac.h"
+#include "tq/tq_math.h"
 #include "golden.h"
 
 static int g_fail;
@@ -483,6 +484,139 @@ static void test_sampler(int vocab)
 	free(prob);
 }
 
+/* --------------------------------------------------- reproducible math */
+
+/*
+ * Checked against libm, which is the right reference precisely because libm is
+ * the thing we cannot use: it says our replacements are *accurate*. What makes
+ * them *reproducible* is that they are a fixed sequence of IEEE-754 double
+ * operations, which no test on a single machine can demonstrate — that is what
+ * the logit hash below, compared between `make test` and `make test-arm`, is
+ * for.
+ */
+static void test_math(void)
+{
+	double worst;
+	int    i;
+
+	printf("reproducible math: accuracy vs libm\n");
+
+	worst = 0.0;
+	for (i = -700; i <= 700; i++) {
+		double x = (double)i * 1.5;
+		double want = exp2(x);
+		double got  = tq_exp2(x);
+		double rel  = fabs(got - want) / (want + 1e-300);
+
+		if (want > 1e-290 && want < 1e290 && rel > worst) {
+			worst = rel;
+		}
+	}
+	CHECK(worst < 1e-12, "tq_exp2 worst relative error %.3g", worst);
+	printf("  tq_exp2   %.2e\n", worst);
+
+	worst = 0.0;
+	for (i = 1; i <= 20000; i++) {
+		double x = (double)i * 0.001;
+		double want = log2(x);
+		double got  = tq_log2(x);
+		double err  = fabs(got - want);
+
+		if (err > worst) {
+			worst = err;
+		}
+	}
+	CHECK(worst < 1e-11, "tq_log2 worst absolute error %.3g", worst);
+	printf("  tq_log2   %.2e absolute\n", worst);
+
+	/* Out to 1100 radians: RoPE reaches ~1024 at the far end of the context,
+	 * which is exactly where a lazy range reduction falls apart. */
+	worst = 0.0;
+	for (i = -110000; i <= 110000; i += 7) {
+		float x = (float)i * 0.01f;
+		double es = fabs((double)tq_sinf(x) - sin((double)x));
+		double ec = fabs((double)tq_cosf(x) - cos((double)x));
+
+		if (es > worst) {
+			worst = es;
+		}
+		if (ec > worst) {
+			worst = ec;
+		}
+	}
+	CHECK(worst < 1e-6, "tq_sinf/tq_cosf worst absolute error %.3g", worst);
+	printf("  tq_sinf/cosf %.2e absolute over +-1100 rad\n", worst);
+
+	worst = 0.0;
+	for (i = 0; i <= 64; i++) {
+		float  y    = (float)i / 64.0f;
+		double want = pow(10000.0, (double)y);
+		double got  = (double)tq_powf(10000.0f, y);
+		double rel  = fabs(got - want) / want;
+
+		if (rel > worst) {
+			worst = rel;
+		}
+	}
+	CHECK(worst < 1e-6, "tq_powf worst relative error %.3g", worst);
+	printf("  tq_powf   %.2e (rope_theta^y)\n", worst);
+
+	worst = 0.0;
+	for (i = -8000; i <= 8000; i++) {
+		float  x    = (float)i * 0.01f;
+		double want = exp((double)x);
+		double got  = (double)tq_expf(x);
+		double rel  = fabs(got - want) / want;
+
+		if (rel > worst) {
+			worst = rel;
+		}
+	}
+	CHECK(worst < 1e-6, "tq_expf worst relative error %.3g", worst);
+	printf("  tq_expf   %.2e\n", worst);
+}
+
+/*
+ * FNV-1a over the raw bytes of every golden logit.
+ *
+ * The point is not the value, it is that the value must be *the same* on a
+ * native build and on the ARM build under qemu. Comparing floats with a
+ * tolerance would hide exactly the last-bit divergence that breaks an
+ * arithmetic decoder, so this hashes the bit patterns and demands equality.
+ * `make test-bitexact` runs both and diffs the two lines.
+ */
+static void print_logit_hash(TqModel *m)
+{
+	TqRuntime rt;
+	size_t    fb = tq_runtime_bytes(m, GOLDEN_STEPS);
+	size_t    cb = tq_kv_bytes(m, GOLDEN_STEPS, TQ_KV_F32);
+	void     *fast = malloc(fb);
+	void     *cache = malloc(cb);
+	uint64_t  h = 1469598103934665603ull;
+	int       step, i, k, rc;
+
+	rc = tq_runtime_init(&rt, m, GOLDEN_STEPS, TQ_KV_F32, fast, fb, cache, cb);
+	CHECK(rc == TQ_OK, "hash runtime: %s", tq_strerror(rc));
+
+	for (step = 0; rc == TQ_OK && step < GOLDEN_STEPS; step++) {
+		rc = tq_forward(&rt, golden_tokens[step], step);
+		for (i = 0; i < m->vocab_size; i++) {
+			unsigned char b[sizeof(float)];
+
+			memcpy(b, &rt.logits[i], sizeof(b));
+			for (k = 0; k < (int)sizeof(b); k++) {
+				h ^= (uint64_t)b[k];
+				h *= 1099511628211ull;
+			}
+		}
+	}
+	printf("logit bit hash: %016llx  [%s]\n", (unsigned long long)h,
+	       tq_kernel_backend());
+
+	free(fast);
+	free(cache);
+}
+
 /* ------------------------------------------------------- arithmetic coding */
 
 static uint64_t ac_rng = 0x9E3779B97F4A7C15ull;
@@ -901,9 +1035,12 @@ int main(int argc, char **argv)
 
 	test_tokenizer(&m);
 	test_sampler(m.vocab_size);
+	test_math();
 	test_arith(&m);
 	test_streaming();
 	test_rejects_garbage();
+
+	print_logit_hash(&m);
 
 	printf("\n%d checks, %d failures\n", g_checks, g_fail);
 	return g_fail ? 1 : 0;

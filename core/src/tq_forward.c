@@ -15,7 +15,9 @@
  * W1/W3. That is free accuracy and free time.
  */
 
-#include <math.h>
+#include <math.h>   /* sqrtf only; see tq_math.h */
+
+#include "tq/tq_math.h"
 #include <string.h>
 
 #include "tq_internal.h"
@@ -48,7 +50,7 @@ static void tq_softmax(float *x, int n)
 		}
 	}
 	for (i = 0; i < n; i++) {
-		x[i] = expf(x[i] - max);
+		x[i] = tq_expf(x[i] - max);
 		sum += x[i];
 	}
 	sum = 1.0f / sum;
@@ -188,12 +190,12 @@ static void tq_rope_prepare(TqRuntime *rt, int pos)
 	int i;
 
 	for (i = 0; i < half; i++) {
-		float freq = 1.0f / powf(m->hdr.rope_theta,
+		float freq = 1.0f / tq_powf(m->hdr.rope_theta,
 					 (float)(2 * i) / (float)m->head_size);
 		float ang = (float)pos * freq;
 
-		rt->rope_cos[i] = cosf(ang);
-		rt->rope_sin[i] = sinf(ang);
+		rt->rope_cos[i] = tq_cosf(ang);
+		rt->rope_sin[i] = tq_sinf(ang);
 	}
 }
 
@@ -340,7 +342,7 @@ int tq_forward(TqRuntime *rt, int token, int pos)
 			for (i = 0; i < m->hidden_dim; i++) {
 				float v = rt->hb[i];
 
-				rt->hb[i] = (v / (1.0f + expf(-v))) * rt->hb3[i];
+				rt->hb[i] = (v / (1.0f + tq_expf(-v))) * rt->hb3[i];
 			}
 		}
 		tq_quantize_q8(rt->hb, rt->hq, m->hidden_dim);

@@ -33,6 +33,14 @@ jobs:
       - name: Cortex-M7 DSP kernels under QEMU
         run: make -C host test-arm
 
+      - name: Logits are bit-identical across architectures
+        # Not a style check. The Semaphore arithmetic decoder desynchronises on
+        # a single differing bit, so "close enough" is a failure. Measured:
+        # libm's own expf/sinf/cosf/powf disagree between macOS-arm64 and
+        # armv7-linux on 1.21% of the values the forward pass uses, which is
+        # why core/src/tq_math.c exists.
+        run: make -C host test-bitexact
+
       - name: Cortex-M7 code size
         run: make -C host size-m7
 
