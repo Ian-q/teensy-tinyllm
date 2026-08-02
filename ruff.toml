@@ -4,3 +4,9 @@ target-version = "py39"
 [lint]
 select = ["E", "F", "W", "I", "UP", "B"]
 ignore = ["E741"]  # `l` is the conventional layer index throughout
+
+[lint.per-file-ignores]
+# make_demo.py embeds the page's HTML, CSS and JS as string literals. Those are
+# markup, not Python, and rewrapping a stylesheet to satisfy a Python line-length
+# rule would make it harder to read, not easier.
+"tools/make_demo.py" = ["E501"]

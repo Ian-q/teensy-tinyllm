@@ -491,6 +491,80 @@ static int do_decode(const char *hex)
  * If they disagree, no amount of protocol work will make them interoperate —
  * see core/include/tq/tq_math.h.
  */
+/*
+ * Per-token cost, as JSON, for the visual walkthrough in docs/.
+ *
+ * This is the number that actually explains Semaphore. "70 characters became 5
+ * bytes" is a result; "'Once upon a' cost 1.4 bits because the model had
+ * already all but written it, and '42' cost 15 because it had not" is the
+ * mechanism. It also shows directly where a fine-tune would pay: the expensive
+ * tokens are the ones outside the model's register.
+ */
+static int do_explain(const char *text)
+{
+	int32_t toks[MAX_MSG_TOKENS];
+	uint8_t wire[MAX_WIRE];
+	TqAcEnc e;
+	char    piece[64];
+	size_t  len;
+	int     n, i, rc;
+	double  total = 0.0;
+
+	n = tq_encode(&g_tok, text, 1, 0, toks, MAX_MSG_TOKENS);
+	if (n < 1 || n - 1 >= SEM_LEN_SYMBOLS) {
+		fprintf(stderr, "encode: bad length\n");
+		return 1;
+	}
+
+	tq_ac_enc_init(&e, wire, sizeof(wire));
+	tq_ac_enc_sym(&e, (uint32_t)(n - 1) * SEM_LEN_FREQ, SEM_LEN_FREQ, TQ_AC_TOT);
+
+	printf("{\n  \"text\": \"");
+	for (i = 0; text[i]; i++) {
+		if (text[i] == '"' || text[i] == '\\') {
+			putchar('\\');
+		}
+		putchar(text[i]);
+	}
+	printf("\",\n  \"raw_bytes\": %zu,\n", strlen(text));
+	printf("  \"deflate_bytes\": %zu,\n", deflate_bytes(text, 0));
+	printf("  \"deflate_dict_bytes\": %zu,\n", deflate_bytes(text, 1));
+	printf("  \"length_field_bits\": 8,\n  \"tokens\": [\n");
+
+	for (i = 0; i + 1 < n; i++) {
+		int    next = toks[i + 1];
+		double bits;
+		int    k;
+
+		rc = tq_forward(&g_rt, toks[i], i);
+		if (rc != TQ_OK) {
+			fprintf(stderr, "forward: %s\n", tq_strerror(rc));
+			return 1;
+		}
+		tq_ac_enc_token(&e, &g_pm, g_rt.logits, next);
+		bits = -log2((double)g_pm.bcnt[next / TQ_AC_BUCKET] / (double)TQ_AC_TOT)
+		       - log2((double)g_pm.scnt[next % TQ_AC_BUCKET] / (double)TQ_AC_TOT);
+		total += bits;
+
+		if (tq_decode(&g_tok, toks[i], next, piece, sizeof(piece)) < 0) {
+			piece[0] = '\0';
+		}
+		printf("    {\"piece\": \"");
+		for (k = 0; piece[k]; k++) {
+			if (piece[k] == '"' || piece[k] == '\\') {
+				putchar('\\');
+			}
+			putchar(piece[k]);
+		}
+		printf("\", \"bits\": %.2f}%s\n", bits, (i + 2 < n) ? "," : "");
+	}
+
+	len = tq_ac_enc_finish(&e);
+	printf("  ],\n  \"token_bits_total\": %.2f,\n", total);
+	printf("  \"wire_bytes\": %zu\n}\n", len);
+	return 0;
+}
+
 #define SEM_HASH_STEPS 8
 
 static int do_hash(void)
@@ -529,6 +603,7 @@ static void usage(void)
 		"  decode HEX      decompress wire bytes back to text\n"
 		"  bench FILE      one message per line, totals at the end\n"
 		"  hash            logit fingerprint; must equal `tinyllm sem hash`\n"
+		"  explain TEXT    per-token bit costs, as JSON\n"
 		"\noptions:\n"
 		"  --dict FILE     prime the deflate baseline with a shared\n"
 		"                  dictionary. Must be held-out text, or the\n"
@@ -570,6 +645,9 @@ int main(int argc, char **argv)
 	}
 	if (!strcmp(argv[2], "hash")) {
 		return do_hash();
+	}
+	if (!strcmp(argv[2], "explain") && argc > 3) {
+		return do_explain(argv[3]);
 	}
 	usage();
 	return 2;
